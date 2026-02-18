@@ -270,3 +270,5 @@ dump.rdb
 .minio.sys/
 
 .env.example
+
+.env.example
