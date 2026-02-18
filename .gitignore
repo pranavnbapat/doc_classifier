@@ -268,3 +268,5 @@ dump.rdb
 
 # MinIO / S3 local storage
 .minio.sys/
+
+.env.example
