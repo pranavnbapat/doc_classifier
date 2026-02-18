@@ -22,7 +22,7 @@ pip install -r requirements.txt
 ### 2. Configure
 
 ```bash
-cp .env.example .env
+cp .env.sample .env
 ```
 
 Edit `.env`:

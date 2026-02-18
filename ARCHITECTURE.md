@@ -154,7 +154,7 @@ doc_classifier/
 ├── test_api.py                     # API test suite
 ├── requirements.txt                # Python dependencies
 ├── .env                            # Environment configuration (not committed)
-├── .env.example                    # Environment template
+├── .env.sample                    # Environment template
 ├── .gitignore                      # Git ignore rules
 ├── README.md                       # User documentation
 ├── ARCHITECTURE.md                 # This file
@@ -255,7 +255,7 @@ VISION_LLM_API_KEY=your-key
 pip install -r requirements.txt
 
 # Configure environment
-cp .env.example .env
+cp .env.sample .env
 # Edit .env with your settings
 
 # Start server
