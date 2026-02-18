@@ -29,8 +29,8 @@ Edit `.env`:
 
 ```bash
 # Basic Auth (Docker-style usernames)
-DOCINT_AUTH_USERS=nifty_chandrasekhar,jolly_poincare,quirky_roentgen,dreamy_agnesi,festive_hypatia,zen_swartz
-DOCINT_AUTH_PASSWORD=3C11TCYVnqXJ
+DOCINT_AUTH_USERS=
+DOCINT_AUTH_PASSWORD=
 
 # Text LLM (Qwen)
 DOCINT_LLM_BASE_URL=https://your-qwen-server.com/v1
@@ -50,42 +50,9 @@ VISION_LLM_API_KEY=your-key
 # Server starts at http://localhost:8000
 ```
 
-## Authentication
-
-All endpoints require **Basic HTTP Authentication**.
-
-**Credentials:**
-- **Username**: Any from `nifty_chandrasekhar`, `jolly_poincare`, `quirky_roentgen`, `dreamy_agnesi`, `festive_hypatia`, `zen_swartz`
-- **Password**: `3C11TCYVnqXJ`
-
 ### Browser Access
 
 Visit `http://localhost:8000/docs` - browser will prompt for username/password.
-
-### curl Example
-
-```bash
-curl -X POST "http://localhost:8000/classify" \
-  -u nifty_chandrasekhar:3C11TCYVnqXJ \
-  -F "file=@document.pdf"
-```
-
-### Python Example
-
-```python
-import requests
-from requests.auth import HTTPBasicAuth
-
-response = requests.post(
-    "http://localhost:8000/classify",
-    files={"file": open("document.pdf", "rb")},
-    auth=HTTPBasicAuth("nifty_chandrasekhar", "3C11TCYVnqXJ"),
-    params={"use_text_llm": "true", "heuristics_alpha": "0.4"}
-)
-
-result = response.json()
-print(f"Best match: {result['best_match']['subcategory_name']}")
-```
 
 ## API Endpoints
 
@@ -113,22 +80,18 @@ Classify a PDF document.
 ```bash
 # Heuristics only (fastest)
 curl -X POST "http://localhost:8000/classify" \
-  -u nifty_chandrasekhar:3C11TCYVnqXJ \
   -F "file=@document.pdf"
 
 # Heuristics + Text LLM with 40/60 split
 curl -X POST "http://localhost:8000/classify?use_text_llm=true&heuristics_alpha=0.4" \
-  -u jolly_poincare:3C11TCYVnqXJ \
   -F "file=@document.pdf"
 
 # Heuristics + Vision LLM (sliding window)
 curl -X POST "http://localhost:8000/classify?use_vision=true&vision_max_pages=20" \
-  -u quirky_roentgen:3C11TCYVnqXJ \
   -F "file=@document.pdf"
 
 # All sources with adaptive fusion
 curl -X POST "http://localhost:8000/classify?use_vision=true&use_text_llm=true&fusion_strategy=adaptive" \
-  -u dreamy_agnesi:3C11TCYVnqXJ \
   -F "file=@document.pdf"
 ```
 
@@ -207,8 +170,7 @@ curl -X POST "http://localhost:8000/classify?use_vision=true&use_text_llm=true&f
 Health check endpoint.
 
 ```bash
-curl http://localhost:8000/health \
-  -u nifty_chandrasekhar:3C11TCYVnqXJ
+curl http://localhost:8000/health
 ```
 
 ### GET /subcategories
@@ -216,8 +178,7 @@ curl http://localhost:8000/health \
 List all subcategory definitions.
 
 ```bash
-curl http://localhost:8000/subcategories \
-  -u jolly_poincare:3C11TCYVnqXJ
+curl http://localhost:8000/subcategories
 ```
 
 ### GET /docs

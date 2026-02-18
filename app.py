@@ -207,14 +207,6 @@ app = FastAPI(
     description="""
     Evidence-based document subcategory classification with intelligent LLM fusion.
     
-    ## Authentication Required
-    
-    This API requires **Basic HTTP Authentication**.
-    
-    **Default Credentials:**
-    - Username: `nifty_chandrasekhar` (or any from: jolly_poincare, quirky_roentgen, dreamy_agnesi, festive_hypatia, zen_swartz)
-    - Password: `3C11TCYVnqXJ`
-    
     ## Features
     
     * **Evidence-Based Classification**: 24+ measurable features, 11 subcategories
@@ -541,7 +533,7 @@ def classify_document(
 async def auth_middleware(request, call_next):
     """
     Global middleware to enforce Basic Auth on all requests.
-    Skips auth for OPTIONS requests (CORS preflight).
+    Skips auth for OPTIONS requests (CORS preflight) and health checks.
     """
     # Skip auth if not enabled
     if not AUTH_ENABLED:
@@ -549,6 +541,10 @@ async def auth_middleware(request, call_next):
     
     # Skip auth for OPTIONS requests (CORS preflight)
     if request.method == "OPTIONS":
+        return await call_next(request)
+    
+    # Skip auth for health check endpoint
+    if request.url.path == "/health":
         return await call_next(request)
     
     # Get Authorization header

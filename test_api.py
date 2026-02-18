@@ -16,8 +16,8 @@ from app import app
 client = TestClient(app)
 
 # Auth credentials (from .env file)
-AUTH_USER = "nifty_chandrasekhar"
-AUTH_PASSWORD = "3C11TCYVnqXJ"
+AUTH_USER = ""
+AUTH_PASSWORD = ""
 
 
 def test_no_auth():

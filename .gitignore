@@ -232,7 +232,6 @@ yarn-error.log*
 # DOCKER
 # =============================================================================
 
-.dockerignore
 Dockerfile.*
 docker-compose.*.yml
 

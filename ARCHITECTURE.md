@@ -204,8 +204,8 @@ doc_classifier/
 
 ```bash
 # Basic Auth
-DOCINT_AUTH_USERS=nifty_chandrasekhar,jolly_poincare,quirky_roentgen,dreamy_agnesi,festive_hypatia,zen_swartz
-DOCINT_AUTH_PASSWORD=3C11TCYVnqXJ
+DOCINT_AUTH_USERS=
+DOCINT_AUTH_PASSWORD=
 
 # Text LLM (Qwen)
 DOCINT_LLM_BASE_URL=https://your-qwen-server.com/v1
