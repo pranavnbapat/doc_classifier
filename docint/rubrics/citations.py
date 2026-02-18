@@ -13,7 +13,7 @@ def score_citations(cites: CitationSignals, *, text_len: int) -> RubricResult:
     """
     intensity = evidence_intensity(cites, text_len=text_len)
 
-    # Bonus if a References heading exists (if you passed that into CitationSignals)
+    # Bonus if a References heading exists (if provided to CitationSignals)
     bonus = 0.08 if cites.has_references_heading else 0.0
     score = min(1.0, intensity + bonus)
 

@@ -17,8 +17,11 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends, Request
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+import secrets
 
 from docint.extract.pdf_text import extract_pdf_text
 from docint.extract.quality import text_quality_ok
@@ -58,13 +61,83 @@ LLM_API_KEY = os.getenv("DOCINT_LLM_API_KEY", "").strip()
 VISION_LLM_BASE_URL = os.getenv("VISION_LLM_BASE_URL", "").rstrip("/")
 if VISION_LLM_BASE_URL and not VISION_LLM_BASE_URL.endswith("/v1"):
     VISION_LLM_BASE_URL = f"{VISION_LLM_BASE_URL}/v1"
-VISION_LLM_MODEL = os.getenv("VISION_LLM_MODEL", "internvl2-8b")
+VISION_LLM_MODEL = os.getenv("VISION_LLM_MODEL", "internvl3-5-14b")
 VISION_LLM_API_KEY = os.getenv("VISION_LLM_API_KEY", LLM_API_KEY).strip()
 
 LLM_CONFIGURED = bool(LLM_BASE_URL and LLM_MODEL)
 
 # All EU languages for Tesseract OCR
 ALL_OCR_LANGS = "bul+ces+dan+deu+ell+eng+est+fin+fra+hrv+hun+ita+lav+lit+mlt+nld+pol+por+ron+slk+slv+spa+swe+gle"
+
+# =============================================================================
+# BASIC AUTH CONFIGURATION
+# =============================================================================
+
+# Initialize HTTPBasic security
+security = HTTPBasic()
+
+# Load authorized users from env
+AUTH_USERS_STR = os.getenv("DOCINT_AUTH_USERS", "")
+AUTH_PASSWORD = os.getenv("DOCINT_AUTH_PASSWORD", "")
+
+# Parse comma-separated usernames
+AUTHORIZED_USERS = {}
+if AUTH_USERS_STR and AUTH_PASSWORD:
+    for username in AUTH_USERS_STR.split(","):
+        username = username.strip()
+        if username:
+            AUTHORIZED_USERS[username] = AUTH_PASSWORD
+
+# Track if auth is enabled
+AUTH_ENABLED = bool(AUTHORIZED_USERS)
+
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """
+    Verify Basic Auth credentials.
+    
+    Args:
+        credentials: HTTP Basic auth credentials
+        
+    Returns:
+        str: The authenticated username
+        
+    Raises:
+        HTTPException: If credentials are invalid
+    """
+    if not AUTH_ENABLED:
+        # No auth configured, allow all
+        return "anonymous"
+    
+    # Check if username exists
+    stored_password = AUTHORIZED_USERS.get(credentials.username)
+    
+    if stored_password is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password",
+            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+        )
+    
+    # Verify password using constant-time comparison
+    if not secrets.compare_digest(credentials.password, stored_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password",
+            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+        )
+    
+    return credentials.username
+
+
+def require_auth():
+    """
+    Dependency that enforces authentication.
+    Use this when auth should be required even if not globally enabled.
+    """
+    if not AUTH_ENABLED:
+        return "anonymous"
+    return Depends(verify_credentials)
 
 
 # =============================================================================
@@ -134,6 +207,14 @@ app = FastAPI(
     description="""
     Evidence-based document subcategory classification with intelligent LLM fusion.
     
+    ## Authentication Required
+    
+    This API requires **Basic HTTP Authentication**.
+    
+    **Default Credentials:**
+    - Username: `nifty_chandrasekhar` (or any from: jolly_poincare, quirky_roentgen, dreamy_agnesi, festive_hypatia, zen_swartz)
+    - Password: `3C11TCYVnqXJ`
+    
     ## Features
     
     * **Evidence-Based Classification**: 24+ measurable features, 11 subcategories
@@ -149,7 +230,7 @@ app = FastAPI(
     - **Configurable alpha**: Control base weight between heuristics and LLM
     """,
     version="2.0.0",
-    docs_url="/docs",
+    docs_url="/docs",  # Enable docs - they'll be protected by middleware
     redoc_url="/redoc",
 )
 
@@ -456,12 +537,68 @@ def classify_document(
 # API ENDPOINTS
 # =============================================================================
 
+@app.middleware("http")
+async def auth_middleware(request, call_next):
+    """
+    Global middleware to enforce Basic Auth on all requests.
+    Skips auth for OPTIONS requests (CORS preflight).
+    """
+    # Skip auth if not enabled
+    if not AUTH_ENABLED:
+        return await call_next(request)
+    
+    # Skip auth for OPTIONS requests (CORS preflight)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    
+    # Get Authorization header
+    auth_header = request.headers.get("Authorization")
+    
+    if not auth_header or not auth_header.startswith("Basic "):
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+            content={"detail": "Authentication required"},
+        )
+    
+    # Decode credentials
+    try:
+        import base64
+        encoded_credentials = auth_header.split(" ", 1)[1]
+        decoded = base64.b64decode(encoded_credentials).decode("utf-8")
+        username, password = decoded.split(":", 1)
+        
+        # Verify
+        stored_password = AUTHORIZED_USERS.get(username)
+        if stored_password is None or not secrets.compare_digest(password, stored_password):
+            return JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+                content={"detail": "Invalid credentials"},
+            )
+        
+        # Store username in request state for later use
+        request.state.username = username
+        
+    except Exception:
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+            content={"detail": "Invalid authentication format"},
+        )
+    
+    return await call_next(request)
+
+
 @app.get("/")
-async def root():
+async def root(request: Request):
     """Root endpoint with API info."""
+    username = getattr(request.state, 'username', 'anonymous')
     return {
         "name": "Doc Classifier API",
         "version": "2.0.0",
+        "authenticated_user": username,
+        "auth_enabled": AUTH_ENABLED,
         "features": ["heuristics", "vision_llm", "text_llm", "intelligent_fusion"],
         "docs": "/docs",
         "health": "/health",
@@ -469,7 +606,7 @@ async def root():
 
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
     """Health check endpoint."""
     from urllib.parse import urlparse
     
@@ -479,10 +616,14 @@ async def health():
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}"
     
+    username = getattr(request.state, 'username', 'anonymous')
+    
     return {
         "status": "ok",
         "version": "2.0.0",
         "timestamp": datetime.utcnow().isoformat(),
+        "authenticated_user": username,
+        "auth_enabled": AUTH_ENABLED,
         "models": {
             "heuristics": {"available": True},
             "text_llm": {
@@ -501,6 +642,7 @@ async def health():
 
 @app.post("/classify", response_model=ClassificationResponse)
 async def classify_endpoint(
+    request: Request,
     file: UploadFile = File(..., description="PDF file to classify"),
     use_vision: bool = Query(False, description="Use Vision LLM (InternVL)"),
     use_text_llm: bool = Query(False, description="Use Text LLM (Qwen)"),
@@ -558,7 +700,7 @@ async def classify_endpoint(
 
 
 @app.get("/subcategories")
-async def list_subcategories():
+async def list_subcategories(request: Request):
     """List all subcategory definitions."""
     from docint.rubrics.subcategories import get_all_detectable_features
     

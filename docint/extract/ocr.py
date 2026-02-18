@@ -60,7 +60,7 @@ def ocr_pdf(
         ExtractedDoc (source="ocr")
     """
     if tesseract_cmd:
-        # Useful if your environment doesn’t have tesseract on PATH
+        # Useful when tesseract is not on PATH
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
     images_all = convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
@@ -71,7 +71,7 @@ def ocr_pdf(
     lines: List[str] = []
 
     # psm 6 = Assume a uniform block of text (good default for reports)
-    # You can try psm 4 for multi-column sometimes.
+    # psm 4 may be tried for multi-column sometimes.
     tesseract_config = "--psm 6"
 
     for img in images:

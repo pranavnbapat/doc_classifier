@@ -156,9 +156,8 @@ cython_debug/
 # =============================================================================
 
 # Environment variables and secrets
-.env
-.env.*
 !.env.example
+!.env.sample
 
 # JSON data files (often contain sensitive data or are large)
 *.json

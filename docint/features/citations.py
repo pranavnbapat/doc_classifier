@@ -17,7 +17,7 @@ class CitationSignals:
     cite_authoryear: int    # (Smith, 2020), (Smith et al., 2020)
     doi_mentions: int
     url_mentions: int
-    has_references_heading: bool  # optional: pass in from sections feature if you want
+    has_references_heading: bool  # optional, from sections feature
 
 
 _NUMERIC_CITE_RE = re.compile(r"\[\s*\d+(\s*[-–,]\s*\d+)*\s*\]")
@@ -33,7 +33,7 @@ def detect_citations(text: str, *, has_references_heading: bool = False) -> Cita
 
     Args:
         text: extracted text
-        has_references_heading: optionally include whether you detected a References section title
+        has_references_heading: whether a References section was detected
 
     Returns:
         CitationSignals

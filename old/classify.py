@@ -52,7 +52,7 @@ def _heuristic_probs_from_rubrics(
     Convert rubric scores (0..1) into a probability-like distribution.
 
     This is intentionally simple and tunable.
-    You can later replace this with logistic regression on labelled data.
+    This can be replaced with logistic regression on labelled data.
     """
     # Research tends to be structure + citations
     scientific = 0.55 * imrad + 0.45 * cites
@@ -212,7 +212,7 @@ def classify_pdf(
     r_ped = score_pedagogy(kw)
     r_proc = score_procedure(kw)
 
-    # Simple policy hint from keyword bucket (until you add a proper policy rubric)
+    # Simple policy hint from keyword bucket (until a proper policy rubric)
     policy_hint = bucket_score(kw.bucket_hits.get("policy_guidance", 0), saturation=25)
 
     heur_probs = _heuristic_probs_from_rubrics(

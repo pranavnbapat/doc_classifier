@@ -18,7 +18,7 @@ class KeywordSignals:
 
 
 # Curated cue-phrases. Keep them short + high-signal.
-# You can tune these on your EU-FarmBook corpus.
+# These keywords may need adjustment based on the specific corpus.
 KEYWORD_BUCKETS: Dict[str, List[str]] = {
     "deliverable_report": [
         "deliverable", "work package", "grant agreement", "ga number",
@@ -48,7 +48,7 @@ def count_keywords(text: str, *, buckets: Dict[str, List[str]] = KEYWORD_BUCKETS
     Notes:
     - Uses simple substring counts (case-insensitive).
     - This is deterministic and fast.
-    - For more precision later, you can switch to token/regex matching.
+    - Token/regex matching can be implemented later for improved precision.
 
     Returns:
         KeywordSignals

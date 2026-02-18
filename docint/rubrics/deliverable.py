@@ -16,7 +16,7 @@ def score_deliverable(
     Uses deliverable keyword bucket + optional section cues (executive summary, appendix).
     """
     hits = kw.bucket_hits.get("deliverable_report", 0)
-    base = bucket_score(hits, saturation=30)  # tune saturation on your corpus
+    base = bucket_score(hits, saturation=30)  # adjust saturation based on corpus characteristics
 
     # Small structural bonus for deliverable-ish sections
     bonus = 0.0
