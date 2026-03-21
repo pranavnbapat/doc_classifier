@@ -1,10 +1,10 @@
 services:
-  doc-classifier:
+  ko-classifier:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/pranavnbapat/doc-classifier:latest
-    container_name: doc-classifier
+    image: ghcr.io/pranavnbapat/ko-classifier:latest
+    container_name: ko-classifier
     restart: unless-stopped
     
     # Environment configuration

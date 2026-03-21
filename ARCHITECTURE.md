@@ -1,267 +1,218 @@
-# Doc Classifier Architecture v2.0
+# KO Classifier Architecture
 
-## Overview
+## Scope
 
-A production-ready document classification API that combines evidence-based heuristics with optional LLM analysis (both text and vision models) using intelligent fusion algorithms.
+This service currently implements PDF-based document subcategory classification. It does not yet enforce the broader KO category-selection policy in runtime. That policy work, including `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, is documented separately in:
 
-## System Architecture
+- [data_model/category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/category_auto_selection_policy.md)
+- [data_model/subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/subcategories_consolidation_analysis.md)
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         CLIENT REQUEST                                   │
-│  POST /classify with PDF + Basic Auth                                   │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      AUTHENTICATION MIDDLEWARE                           │
-│  • Basic HTTP Auth with Docker-style usernames                          │
-│  • Returns 401 with WWW-Authenticate header if missing/invalid          │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      DOCUMENT PROCESSING PIPELINE                        │
-│                                                                          │
-│  1. PDF UPLOAD → TEMP STORAGE                                            │
-│                                                                          │
-│  2. TEXT EXTRACTION (Parallel paths)                                     │
-│     ┌─────────────────────┐  ┌─────────────────────┐                    │
-│     │   PyMuPDF (fast)    │  │  Tesseract OCR      │                    │
-│     │   Primary method    │──│  Fallback if poor   │                    │
-│     │   Extracts text     │  │  text quality       │                    │
-│     └─────────────────────┘  └─────────────────────┘                    │
-│                                                                          │
-│  3. FEATURE EXTRACTION (24+ signals)                                     │
-│     • Section detection (IMRaD, headings)                               │
-│     • Citation patterns (numeric, author-year, DOI)                     │
-│     • Keyword buckets (deliverable, educational, etc.)                  │
-│     • Visual features (short lines, layout)                             │
-│                                                                          │
-│  4. EVIDENCE-BASED SCORING                                               │
-│     • Score all 11 subcategories                                        │
-│     • Weighted feature combination                                      │
-│     • Confidence + probability calculation                              │
-│     • Rationale generation with excerpts                                │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-                    ▼               ▼               ▼
-┌───────────────────────┐ ┌─────────────────┐ ┌─────────────────────────┐
-│   EVIDENCE-BASED      │ │   TEXT LLM      │ │   VISION LLM            │
-│   (Always runs)       │ │   (Qwen)        │ │   (InternVL)            │
-│                       │ │   Optional      │ │   Optional              │
-│ • Heuristic scoring   │ │                 │ │                         │
-│ • Feature-based       │ │ • Analyzes      │ │ • Converts PDF to       │
-│ • Measurable signals  │ │   extracted     │ │   images                │
-│ • Fast (< 100ms)      │ │   text          │ │ • Sliding window        │
-│                       │ │ • 11 categories │ │   (4 pages, overlap 2)  │
-│                       │ │ • Rationale     │ │ • Sees layout/images    │
-│                       │ │ • ~2-4s         │ │ • ~5-15s                │
-└───────────────────────┘ └─────────────────┘ └─────────────────────────┘
-                    │               │               │
-                    └───────────────┴───────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      INTELLIGENT FUSION                                  │
-│                                                                          │
-│  When multiple sources enabled:                                         │
-│                                                                          │
-│  1. SOURCE RESULTS AGGREGATION                                           │
-│     • Collect probabilities from each source                            │
-│     • Track confidence scores                                           │
-│                                                                          │
-│  2. FUSION STRATEGY (configurable)                                       │
-│     ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐         │
-│     │   WEIGHTED      │ │   ADAPTIVE      │ │   AGREEMENT     │         │
-│     │   Static alpha  │ │   Confidence    │ │   Bonus for     │         │
-│     │   40%/60%       │ │   weighting     │ │   agreeing      │         │
-│     │   (default)     │ │   (recommended) │ │   sources       │         │
-│     └─────────────────┘ └─────────────────┘ └─────────────────┘         │
-│                                                                          │
-│  3. PROBABILITY FUSION                                                   │
-│     • Normalize all source probabilities                                │
-│     • Apply fusion weights                                              │
-│     • Re-normalize to sum to 1.0                                        │
-│                                                                          │
-│  4. AGREEMENT CALCULATION                                                │
-│     • Jaccard similarity of top-k predictions                           │
-│     • 0.0 = complete disagreement, 1.0 = perfect agreement              │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         API RESPONSE                                     │
-│                                                                          │
-│  {                                                                        │
-│    "best_match": {         ← Fused or heuristics-only result            │
-│      "subcategory_id": "...",                                           │
-│      "subcategory_name": "...",                                         │
-│      "confidence": 0.72,                                                │
-│      "probability": 0.21,                                               │
-│      "rationale": "..."                                                 │
-│    },                                                                     │
-│    "all_candidates": [...],  ← All 11 subcategories with scores         │
-│    "fusion": {               ← If fusion occurred                       │
-│      "fused": true,                                                     │
-│      "strategy": "adaptive",                                            │
-│      "weights": {"heuristics": 0.4, "text_llm": 0.6},                  │
-│      "agreement_score": 0.85                                           │
-│    },                                                                     │
-│    "heuristics": {...},      ← Individual source results                │
-│    "vision_llm": {...},                                                 │
-│    "text_llm": {...},                                                   │
-│    "processing_info": {                                                  │
-│      "processing_time_ms": 4500,                                        │
-│      "sources_used": [...],                                             │
-│      "fusion_enabled": true                                             │
-│    }                                                                      │
-│  }                                                                        │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+The live API path in this repository accepts PDFs and classifies them into 11 consolidated document subcategories.
+
+## High-Level Flow
+
+```text
+Client PDF upload
+  -> FastAPI request handling
+  -> PDF text extraction
+  -> OCR fallback if text quality is poor
+  -> heuristic feature extraction and scoring
+  -> optional text LLM classification
+  -> optional vision LLM classification
+  -> probability fusion
+  -> ranked response with evidence and contrastive rationale
 ```
 
-## Data Model
+## Runtime Pipeline
 
-### 11 Subcategories (from data_model.subcategories_document_consolidated.json)
+### 1. Ingress
 
-| ID | Name | Parent Type | Key Features |
-|----|------|-------------|--------------|
-| Zyvdw7E2 | Journal article | scientific_research | IMRaD, peer review, citations |
-| arQwir9z | Conference proceedings | scientific_research | Conference markers, IMRaD |
-| P3nzEsdB | Book chapter | scientific_research | Book features, citations |
-| k6VvsRTc | Thesis | scientific_research | Thesis markers, formal structure |
-| NBq4fMG2 | Book | scientific_research | ISBN, chapters, publisher |
-| CONSOLIDATED_TECH_REPORT | Technical Report | deliverable_report | Deliverable markers, version control |
-| 4NLQdUhM | Tutorial | educational | Tutorial structure, learning objectives |
-| CONSOLIDATED_GUIDE_MANUAL | Guide/Manual | practice_oriented | Procedure steps, materials, safety |
-| CONSOLIDATED_PRESENTATION | Presentation | educational | Slide indicators, visual-heavy |
-| CONSOLIDATED_NEWS_COMM | News & Communication | policy_guidance | News timeliness, press format |
-| CONSOLIDATED_INFO_BOOKLET | Informational Booklet | practice_oriented | Short form, promotional |
+- Entry point: [app.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/app.py)
+- Endpoint: `POST /classify`
+- Current file constraint: `.pdf` only
+- Authentication: Basic Auth when `DOCINT_AUTH_USERS` and `DOCINT_AUTH_PASSWORD` are configured
+- Exception: `GET /health` is intentionally unauthenticated so container and platform health probes can work without credentials
 
-## File Structure
+### 2. Text Extraction
 
-```
-doc_classifier/
-│
-├── app.py                          # FastAPI application, main entry point
-├── start_server.sh                 # Bash startup script
-├── start_server.py                 # Python startup script
-├── test_api.py                     # API test suite
-├── requirements.txt                # Python dependencies
-├── .env                            # Environment configuration (not committed)
-├── .env.sample                    # Environment template
-├── .gitignore                      # Git ignore rules
-├── README.md                       # User documentation
-├── ARCHITECTURE.md                 # This file
-│
-├── data_model/                     # Data model definitions
-│   ├── data_model.subcategories_document_consolidated.json
-│   └── document_subcategories_consolidation.md
-│
-├── docint/                         # Core library
-│   ├── __init__.py
-│   │
-│   ├── extract/                    # Document extraction
-│   │   ├── pdf_text.py            # PyMuPDF text extraction
-│   │   ├── ocr.py                 # Tesseract OCR fallback
-│   │   └── quality.py             # Text quality assessment
-│   │
-│   ├── features/                   # Feature extraction
-│   │   ├── sections.py            # Section heading detection
-│   │   ├── citations.py           # Citation pattern detection
-│   │   ├── keywords.py            # Keyword bucket matching
-│   │   └── doccontrol.py          # Document control features
-│   │
-│   ├── rubrics/                    # Scoring rubrics
-│   │   ├── subcategories.py       # Subcategory definitions
-│   │   ├── subcategory_scorer.py  # Evidence-based scoring engine
-│   │   ├── imrad.py               # IMRaD structure scoring
-│   │   ├── citations.py           # Citation strength scoring
-│   │   ├── deliverable.py         # Deliverable rubric
-│   │   ├── pedagogy.py            # Educational content scoring
-│   │   └── procedure.py           # Procedure content scoring
-│   │
-│   ├── llm/                        # LLM integration
-│   │   └── subcategory_classify.py # Vision & text LLM classification
-│   │
-│   └── fusion/                     # Fusion algorithms
-│       └── intelligent_fusion.py  # Weighted/adaptive/agreement fusion
-│
-├── files/                          # Sample/test files (not committed)
-│
-└── old/                            # Deprecated files
-    └── (moved old implementations)
-```
+- Primary path: [docint/extract/pdf_text.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/extract/pdf_text.py)
+- Quality check: [docint/extract/quality.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/extract/quality.py)
+- OCR fallback: [docint/extract/ocr.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/extract/ocr.py)
 
-## Configuration
+The service first tries direct PDF text extraction. If the resulting text does not meet the quality threshold, it falls back to OCR.
 
-### Environment Variables (.env)
+### 3. Feature Extraction
 
-```bash
-# Basic Auth
-DOCINT_AUTH_USERS=
-DOCINT_AUTH_PASSWORD=
+The heuristic layer is built around measurable signals rather than opaque labels. Core extraction helpers live under:
 
-# Text LLM (Qwen)
-DOCINT_LLM_BASE_URL=https://your-qwen-server.com/v1
-DOCINT_LLM_MODEL=qwen3-30b-a3b-awq
-DOCINT_LLM_API_KEY=your-key
+- [docint/features/sections.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/features/sections.py)
+- [docint/features/citations.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/features/citations.py)
+- [docint/features/keywords.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/features/keywords.py)
 
-# Vision LLM (InternVL)
-VISION_LLM_BASE_URL=https://your-internvl-server.com/v1
-VISION_LLM_MODEL=internvl2-8b
-VISION_LLM_API_KEY=your-key
-```
+Rubric-level scoring modules include:
 
-## API Endpoints
+- [docint/rubrics/imrad.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/imrad.py)
+- [docint/rubrics/citations.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/citations.py)
+- [docint/rubrics/deliverable.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/deliverable.py)
+- [docint/rubrics/pedagogy.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/pedagogy.py)
+- [docint/rubrics/procedure.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/procedure.py)
 
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/` | GET | Required | API info |
-| `/health` | GET | Required | Health check with model status |
-| `/docs` | GET | Required | Swagger UI documentation |
-| `/redoc` | GET | Required | ReDoc documentation |
-| `/subcategories` | GET | Required | List all subcategories |
-| `/classify` | POST | Required | Main classification endpoint |
+The active heuristic signal set currently covers 27 features, including:
 
-## Performance Characteristics
+- academic signals such as `imrad_structure`, `citation_density`, `abstract_quality`, `peer_review_markers`
+- technical signals such as `deliverable_markers`, `version_control`, `technical_specs`, `formal_structure`
+- instructional signals such as `tutorial_structure`, `learning_objectives`, `exercises_assessments`, `procedure_steps`
+- communication and policy signals such as `news_timeliness`, `press_release_format`, `regulatory_update_markers`, `compliance_language`, `governance_references`
+- layout signals such as `slide_indicators`, `visual_heavy`, `short_form`
 
-| Component | Typical Time | Notes |
-|-----------|--------------|-------|
-| Text extraction | 50-200ms | PyMuPDF, depends on PDF size |
-| OCR fallback | 1-5s | Tesseract, only if needed |
-| Heuristics scoring | 50-100ms | Fast, deterministic |
-| Text LLM | 2-5s | Depends on text length |
-| Vision LLM | 5-15s | Sliding window, parallel processing |
-| Fusion | < 10ms | Fast computation |
+### 4. Heuristic Scoring
 
-## Security
+- Scorer: [docint/rubrics/subcategory_scorer.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategory_scorer.py)
+- Criteria source of truth: [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py)
 
-- **Basic HTTP Auth**: All endpoints protected
-- **Timing-attack safe**: `secrets.compare_digest()` for password comparison
-- **Environment-based config**: No secrets in code
-- **Input validation**: File type, size limits
-- **Temp file cleanup**: Automatic removal after processing
+Each subcategory definition carries:
 
-## Deployment
+- detectable features
+- positive signal hints
+- negative signal hints
+- close competitors
+- minimum features required
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+The scorer uses those definitions together with feature-level evidence to produce:
 
-# Configure environment
-cp .env.sample .env
-# Edit .env with your settings
+- evidence score
+- confidence
+- normalized candidate probabilities
+- per-feature excerpts
+- base rationale text
 
-# Start server
-./start_server.sh
-# or
-python start_server.py
-# or
-uvicorn app:app --host 0.0.0.0 --port 8000
-```
+Recent explainability-oriented changes include:
+
+- feature caching to avoid repeated extractor work
+- stronger policy and regulatory-update signals
+- reduced phantom evidence for thesis and conference detection
+- subcategory-specific bonuses and penalties for close competitors
+
+### 5. Optional Text LLM Classification
+
+- Module: [docint/llm/subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/llm/subcategory_classify.py)
+- Intended model family: Qwen or any OpenAI-compatible text endpoint
+
+The text LLM path receives extracted document text and is now prompted with the same criteria vocabulary used by heuristics:
+
+- detectable features
+- positive signals
+- negative signals
+- close competitors
+- minimum evidence expectation
+
+The prompt also asks the model to report:
+
+- matched signals
+- conflicting signals
+- closest alternative
+
+This keeps the LLM output closer to the auditable heuristic taxonomy instead of allowing purely free-form reasoning.
+
+### 6. Optional Vision LLM Classification
+
+- Module: [docint/llm/subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/llm/subcategory_classify.py)
+- Intended model family: InternVL or any OpenAI-compatible vision endpoint
+
+PDF pages are converted to images and passed to the vision model. For longer documents, the service uses a sliding-window approach and then combines window-level probability distributions.
+
+### 7. Fusion
+
+- Module: [docint/fusion/intelligent_fusion.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/fusion/intelligent_fusion.py)
+
+Supported strategies:
+
+- `weighted`
+- `adaptive`
+- `agreement`
+- `cascade`
+
+Fusion operates on normalized source probability distributions and returns:
+
+- fused best match
+- fused ranking
+- source weights
+- agreement score
+- fusion rationale
+
+## Active Document Taxonomy
+
+The runtime taxonomy currently contains 11 consolidated document subcategories:
+
+- `Journal article`
+- `Article in conference proceedings`
+- `Chapter in edited volume`
+- `Thesis`
+- `Book`
+- `Technical Report`
+- `Tutorial`
+- `Guide/Manual`
+- `Presentation`
+- `News & Communication`
+- `Informational Booklet`
+
+The underlying consolidation rationale is documented in:
+
+- [data_model/document_subcategories_consolidation.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/document_subcategories_consolidation.md)
+- [data_model/data_model.subcategories_document_consolidated.json](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/data_model.subcategories_document_consolidated.json)
+
+## Explainability Outputs
+
+The API response includes both direct and contrastive explanation layers.
+
+Candidate-level fields include:
+
+- `features_found`
+- `feature_details`
+- `rationale`
+- `contrastive_rationale`
+
+`contrastive_rationale` is generated in [app.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/app.py) by comparing the winner with nearby alternatives using the same criteria metadata from [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py).
+
+The `/subcategories` endpoint also exposes criteria metadata so that documentation and UIs can stay aligned with runtime definitions.
+
+## Current Architectural Boundaries
+
+### What Is Implemented
+
+- PDF upload and classification
+- heuristic scoring with measurable signals
+- criteria-backed contrastive explanations
+- optional text LLM and vision LLM classification
+- fusion across sources
+
+### What Is Documented But Not Yet Enforced In Runtime
+
+- category auto-selection by KO mode
+- category filtering for file-based versus URL-based KOs
+- `Software Application` availability only for URL-based KOs
+- broader non-document category handling such as `Dataset`, `Video`, `Audio`, and `Image`
+
+Those rules are part of the taxonomy and ingestion design work, not the current `/classify` implementation.
+
+## Deployment Paths
+
+### Standalone
+
+- install Python dependencies from [requirements.txt](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/requirements.txt)
+- install `poppler-utils`, `tesseract-ocr`, and required language packs
+- configure `.env`
+- run via [start_server.sh](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/start_server.sh), [start_server.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/start_server.py), or `uvicorn`
+
+### Docker
+
+- build and run with [Dockerfile](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/Dockerfile)
+- local Compose path available in [docker-compose.yml](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docker-compose.yml)
+
+## File Map
+
+- [app.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/app.py): API entry point and response shaping
+- [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py): criteria source of truth
+- [docint/rubrics/subcategory_scorer.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategory_scorer.py): heuristic scoring engine
+- [docint/llm/subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/llm/subcategory_classify.py): text and vision LLM integration
+- [data_model/](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model): taxonomy consolidation and category policy documents

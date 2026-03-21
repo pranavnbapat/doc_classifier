@@ -42,6 +42,9 @@ class SubcategoryDefinition:
     description: str
     parent_type: ParentType
     detectable_features: List[FeatureDefinition]
+    positive_signal_hints: List[str] = field(default_factory=list)
+    negative_signal_hints: List[str] = field(default_factory=list)
+    close_competitors: List[str] = field(default_factory=list)
     # Minimum features required for positive identification
     min_features_required: int = 2
     # Whether this subcategory can be auto-detected (some are too ambiguous)
@@ -196,6 +199,12 @@ FEATURES = {
         weight=0.15,
         extractor_key="promotional_signals"
     ),
+    "regulatory_update_markers": FeatureDefinition(
+        name="regulatory_update_markers",
+        description="New regulation/policy update cues, effective dates, legal change framing",
+        weight=0.20,
+        extractor_key="regulatory_update_signals"
+    ),
     
     # Presentation features
     "slide_indicators": FeatureDefinition(
@@ -244,6 +253,18 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["citation_density"],
             FEATURES["abstract_quality"],
         ],
+        positive_signal_hints=[
+            "IMRaD research structure",
+            "citation density and references",
+            "structured abstract",
+            "peer-review or journal cues",
+        ],
+        negative_signal_hints=[
+            "short promotional format",
+            "slide-like layout",
+            "missing research structure",
+        ],
+        close_competitors=["Article in conference proceedings", "Chapter in edited volume", "Technical Report"],
         min_features_required=3,
         rationale_template="Identified as journal article due to {features_found} (confidence: {confidence:.2f})",
     ),
@@ -259,6 +280,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["citation_density"],
             FEATURES["peer_review_markers"],
         ],
+        positive_signal_hints=[
+            "conference or proceedings markers",
+            "research-paper structure",
+            "citation density",
+        ],
+        negative_signal_hints=[
+            "no conference or venue cues",
+            "book-oriented signals stronger than conference signals",
+        ],
+        close_competitors=["Journal article", "Chapter in edited volume"],
         min_features_required=2,
         rationale_template="Conference paper detected based on {features_found} (confidence: {confidence:.2f})",
     ),
@@ -273,6 +304,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["citation_density"],
             FEATURES["imrad_structure"],
         ],
+        positive_signal_hints=[
+            "chapter or edited-volume cues",
+            "book/publication markers",
+            "citations with academic prose",
+        ],
+        negative_signal_hints=[
+            "conference markers stronger than book cues",
+            "journal-style structure dominates without book signals",
+        ],
+        close_competitors=["Book", "Journal article", "Article in conference proceedings"],
         min_features_required=2,
         rationale_template="Book chapter identified through {features_found} (confidence: {confidence:.2f})",
     ),
@@ -288,6 +329,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["citation_density"],
             FEATURES["formal_structure"],
         ],
+        positive_signal_hints=[
+            "thesis/dissertation markers",
+            "university or degree cues",
+            "formal long-form academic structure",
+        ],
+        negative_signal_hints=[
+            "very short form",
+            "no degree or university markers",
+        ],
+        close_competitors=["Book", "Journal article", "Technical Report"],
         min_features_required=2,
         rationale_template="Thesis/Dissertation confirmed via {features_found} (confidence: {confidence:.2f})",
     ),
@@ -302,6 +353,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["formal_structure"],
             FEATURES["citation_density"],
         ],
+        positive_signal_hints=[
+            "ISBN, publisher, or chapter cues",
+            "long-form publication structure",
+            "book-oriented front matter",
+        ],
+        negative_signal_hints=[
+            "short form",
+            "project-report cues stronger than book cues",
+        ],
+        close_competitors=["Chapter in edited volume", "Thesis"],
         min_features_required=2,
         rationale_template="Book/monograph detected based on {features_found} (confidence: {confidence:.2f})",
     ),
@@ -318,6 +379,18 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["technical_specs"],
             FEATURES["formal_structure"],
         ],
+        positive_signal_hints=[
+            "deliverable or project markers",
+            "revision/version cues",
+            "technical specification language",
+            "formal report structure",
+        ],
+        negative_signal_hints=[
+            "short communication format",
+            "brochure or factsheet style layout without report structure",
+            "strong academic publication structure",
+        ],
+        close_competitors=["Journal article", "Guide/Manual", "News & Communication"],
         min_features_required=2,
         rationale_template="Technical report identified via {features_found} (confidence: {confidence:.2f})",
     ),
@@ -333,6 +406,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["learning_objectives"],
             FEATURES["exercises_assessments"],
         ],
+        positive_signal_hints=[
+            "explicit steps or learning progression",
+            "tutorial/how-to framing",
+            "examples, exercises, or practice tasks",
+        ],
+        negative_signal_hints=[
+            "reference-manual tone without progression",
+            "slide-format cues stronger than tutorial cues",
+        ],
+        close_competitors=["Guide/Manual", "Presentation"],
         min_features_required=2,
         rationale_template="Tutorial detected through {features_found} (confidence: {confidence:.2f})",
     ),
@@ -350,6 +433,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["checklists"],
             FEATURES["formal_structure"],
         ],
+        positive_signal_hints=[
+            "reference or guidance wording",
+            "procedure/materials/safety cues",
+            "manual-like structured sections",
+        ],
+        negative_signal_hints=[
+            "explicit tutorial progression stronger than reference cues",
+            "slide-format cues stronger than manual cues",
+        ],
+        close_competitors=["Tutorial", "Technical Report", "Presentation"],
         min_features_required=3,
         rationale_template="Guide/Manual confirmed via {features_found} (confidence: {confidence:.2f})",
     ),
@@ -365,6 +458,16 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["visual_heavy"],
             FEATURES["short_form"],
         ],
+        positive_signal_hints=[
+            "slide/page indicators",
+            "visual-heavy pages",
+            "short text blocks and title-heavy layout",
+        ],
+        negative_signal_hints=[
+            "strong policy/news cues without slide evidence",
+            "continuous prose structure",
+        ],
+        close_competitors=["Informational Booklet", "News & Communication", "Tutorial"],
         min_features_required=2,
         rationale_template="Presentation format detected via {features_found} (confidence: {confidence:.2f})",
     ),
@@ -379,8 +482,21 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["news_timeliness"],
             FEATURES["press_release_format"],
             FEATURES["short_form"],
-            FEATURES["promotional_content"],
+            FEATURES["regulatory_update_markers"],
+            FEATURES["compliance_language"],
+            FEATURES["governance_references"],
         ],
+        positive_signal_hints=[
+            "timeliness or update framing",
+            "press-release/byline structure",
+            "regulatory or policy update language",
+            "governance/compliance references",
+        ],
+        negative_signal_hints=[
+            "slide-format evidence stronger than communication evidence",
+            "promotional booklet cues without policy/news cues",
+        ],
+        close_competitors=["Informational Booklet", "Presentation", "Technical Report"],
         min_features_required=2,
         rationale_template="News/Communication document via {features_found} (confidence: {confidence:.2f})",
     ),
@@ -396,6 +512,17 @@ SUBCATEGORIES: Dict[str, SubcategoryDefinition] = {
             FEATURES["promotional_content"],
             FEATURES["visual_heavy"],
         ],
+        positive_signal_hints=[
+            "short form",
+            "brochure/factsheet/flyer-like layout",
+            "concise informational or promotional wording",
+        ],
+        negative_signal_hints=[
+            "policy/news cues stronger than booklet cues",
+            "clear report or deliverable structure",
+            "clear slide markers",
+        ],
+        close_competitors=["Presentation", "News & Communication"],
         min_features_required=2,
         rationale_template="Informational booklet detected via {features_found} (confidence: {confidence:.2f})",
     ),
@@ -417,3 +544,20 @@ def get_all_detectable_features() -> List[str]:
         for feat in subcat.detectable_features:
             features.add(feat.name)
     return sorted(features)
+
+
+def get_subcategory_criteria() -> Dict[str, Dict[str, List[str] | int | str]]:
+    """Return subcategory criteria hints for explanation and documentation."""
+    out: Dict[str, Dict[str, List[str] | int | str]] = {}
+    for key, subcat in SUBCATEGORIES.items():
+        out[key] = {
+            "id": subcat.id,
+            "name": subcat.name,
+            "parent_type": subcat.parent_type.value,
+            "positive_signal_hints": subcat.positive_signal_hints,
+            "negative_signal_hints": subcat.negative_signal_hints,
+            "close_competitors": subcat.close_competitors,
+            "minimum_features_required": subcat.min_features_required,
+            "detectable_features": [f.name for f in subcat.detectable_features],
+        }
+    return out

@@ -190,8 +190,10 @@ def confidence_adaptive_fusion(
     if total_weight > 0:
         adjusted_weights = {k: v / total_weight for k, v in adjusted_weights.items()}
     
-    # Use weighted fusion with adjusted weights
-    return weighted_fusion(results, adjusted_weights)
+    # Use weighted fusion with adjusted weights, but preserve the selected strategy label.
+    result = weighted_fusion(results, adjusted_weights)
+    result.fusion_strategy = "adaptive"
+    return result
 
 
 def agreement_based_fusion(

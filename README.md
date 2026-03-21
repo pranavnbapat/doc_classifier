@@ -1,288 +1,262 @@
-# Doc Classifier API v2.0
+# KO Classifier API
 
-Production-ready document subcategory classification API with evidence-based heuristics, dual LLM support (text and vision), and intelligent fusion.
+FastAPI service for explainable PDF document subcategory classification. The current runtime scope is PDF-based document classification into 11 consolidated document subcategories, with deterministic heuristics always available and optional text and vision LLM augmentation.
 
-## Features
+The broader category and KO-ingestion policy work is documented under [data_model/category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, but the `/classify` endpoint in this repository currently classifies PDFs as document subcategories only.
 
-- **Evidence-Based Classification**: 24+ measurable features, 11 subcategories, deterministic scoring
-- **Text LLM (Qwen)**: Analyzes extracted text for semantic understanding
-- **Vision LLM (InternVL)**: Analyzes PDF pages as images using sliding window (up to 50 pages)
-- **Intelligent Fusion**: Combines multiple sources using confidence-adaptive weighting
-- **Basic Auth Protection**: Secure access with Docker-style usernames
-- **Full EU Language Support**: All Tesseract OCR languages
+## What The API Does
 
-## Quick Start
+- Extracts text from PDFs with PyMuPDF.
+- Falls back to OCR when extracted text quality is poor.
+- Scores the document against 11 consolidated document subcategories using measurable heuristic signals.
+- Optionally asks a text LLM and/or a vision LLM to classify the same document.
+- Fuses heuristic and LLM probabilities with configurable strategies.
+- Returns feature-level evidence, rationale text, and contrastive explanations for top candidates.
 
-### 1. Install
+## Current Document Subcategories
 
-```bash
-pip install -r requirements.txt
-```
+- `Journal article`
+- `Article in conference proceedings`
+- `Chapter in edited volume`
+- `Thesis`
+- `Book`
+- `Technical Report`
+- `Tutorial`
+- `Guide/Manual`
+- `Presentation`
+- `News & Communication`
+- `Informational Booklet`
 
-### 2. Configure
+The consolidation rationale is documented in:
 
-```bash
-cp .env.sample .env
-```
+- [data_model/document_subcategories_consolidation.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/document_subcategories_consolidation.md)
+- [data_model/subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/subcategories_consolidation_analysis.md)
 
-Edit `.env`:
+## Explainability Model
 
-```bash
-# Basic Auth (Docker-style usernames)
-DOCINT_AUTH_USERS=
-DOCINT_AUTH_PASSWORD=
+The heuristic layer uses 27 measurable signals, including:
 
-# Text LLM (Qwen)
-DOCINT_LLM_BASE_URL=https://your-qwen-server.com/v1
-DOCINT_LLM_MODEL=qwen3-30b-a3b-awq
-DOCINT_LLM_API_KEY=your-key
+- academic structure signals such as `imrad_structure`, `citation_density`, `abstract_quality`, `peer_review_markers`
+- technical and deliverable signals such as `deliverable_markers`, `version_control`, `technical_specs`
+- instructional signals such as `tutorial_structure`, `learning_objectives`, `procedure_steps`, `checklists`
+- policy and communication signals such as `news_timeliness`, `press_release_format`, `regulatory_update_markers`, `compliance_language`, `governance_references`
+- layout signals such as `slide_indicators`, `visual_heavy`, `short_form`
 
-# Vision LLM (InternVL)
-VISION_LLM_BASE_URL=https://your-internvl-server.com/v1
-VISION_LLM_MODEL=internvl2-8b
-VISION_LLM_API_KEY=your-key
-```
+The source of truth for subcategory criteria is [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py). Each subcategory definition carries:
 
-### 3. Run
+- detectable features
+- positive signal hints
+- negative signal hints
+- close competitors
+- minimum features required
 
-```bash
-./start_server.sh
-# Server starts at http://localhost:8000
-```
+Those same criteria are now used in three places:
 
-### Browser Access
-
-Visit `http://localhost:8000/docs` - browser will prompt for username/password.
+- heuristic scoring
+- contrastive API explanations
+- LLM prompting guidance
 
 ## API Endpoints
 
-### POST /classify
+### `POST /classify`
 
-Classify a PDF document.
+Classifies a PDF document.
 
-**Authentication**: Required (Basic Auth)
+Important runtime constraint:
 
-**Parameters:**
+- only `.pdf` files are currently accepted by the API
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `file` | file | required | PDF file to classify |
-| `use_vision` | boolean | `false` | Enable Vision LLM (InternVL) |
-| `use_text_llm` | boolean | `false` | Enable Text LLM (Qwen) |
-| `heuristics_alpha` | float | `0.4` | Weight for heuristics (0.0-1.0) |
-| `fusion_strategy` | string | `adaptive` | `weighted`, `adaptive`, `agreement`, `cascade` |
-| `vision_max_pages` | int | `20` | Max pages for vision analysis (1-50) |
-| `ocr_lang` | string | all EU | Tesseract OCR languages |
-| `ocr_max_pages` | int | `10` | Max pages for OCR fallback |
+Query parameters:
 
-**Examples:**
+- `use_vision`: enable InternVL-style vision classification
+- `use_text_llm`: enable text LLM classification
+- `heuristics_alpha`: heuristic weight used by weighted fusion
+- `fusion_strategy`: `weighted`, `adaptive`, `agreement`, or `cascade`
+- `vision_max_pages`: maximum number of pages passed to the vision model
+- `ocr_lang`: Tesseract OCR language bundle
+- `ocr_max_pages`: maximum pages sent through OCR fallback
 
-```bash
-# Heuristics only (fastest)
-curl -X POST "http://localhost:8000/classify" \
-  -F "file=@document.pdf"
-
-# Heuristics + Text LLM with 40/60 split
-curl -X POST "http://localhost:8000/classify?use_text_llm=true&heuristics_alpha=0.4" \
-  -F "file=@document.pdf"
-
-# Heuristics + Vision LLM (sliding window)
-curl -X POST "http://localhost:8000/classify?use_vision=true&vision_max_pages=20" \
-  -F "file=@document.pdf"
-
-# All sources with adaptive fusion
-curl -X POST "http://localhost:8000/classify?use_vision=true&use_text_llm=true&fusion_strategy=adaptive" \
-  -F "file=@document.pdf"
-```
-
-**Response:**
-
-```json
-{
-  "best_match": {
-    "subcategory_id": "k6VvsRTc",
-    "subcategory_name": "Thesis",
-    "parent_type": "scientific_research",
-    "confidence": 0.72,
-    "probability": 0.21,
-    "evidence_score": 0.42,
-    "features_found": ["thesis_markers", "imrad_structure", "citation_density"],
-    "rationale": "Thesis/Dissertation confirmed via thesis_markers, imrad_structure, citation_density..."
-  },
-  "all_candidates": [
-    {
-      "subcategory_id": "k6VvsRTc",
-      "subcategory_name": "Thesis",
-      "confidence": 0.72,
-      "probability": 0.21,
-      "rank": 1
-    },
-    {
-      "subcategory_id": "NBq4fMG2",
-      "subcategory_name": "Book",
-      "confidence": 0.53,
-      "probability": 0.15,
-      "rank": 2
-    }
-  ],
-  "fusion": {
-    "fused": true,
-    "strategy": "adaptive",
-    "weights": {
-      "heuristics": 0.35,
-      "text_llm": 0.45,
-      "vision_llm": 0.20
-    },
-    "agreement_score": 0.85,
-    "rationale": "Sources agree on Thesis; confidence-adaptive weighting applied"
-  },
-  "heuristics": {
-    "subcategory_name": "Thesis",
-    "confidence": 0.60,
-    "features_found": ["thesis_markers", "imrad_structure"]
-  },
-  "vision_llm": {
-    "subcategory_name": "Thesis",
-    "confidence": 0.95,
-    "rationale": "Document shows academic structure..."
-  },
-  "text_llm": {
-    "subcategory_name": "Book",
-    "confidence": 0.70,
-    "rationale": "Long-form academic content..."
-  },
-  "document_info": {
-    "filename": "document.pdf",
-    "pages": 45,
-    "source": "pdf_text",
-    "text_length": 45231
-  },
-  "processing_info": {
-    "processing_time_ms": 8500,
-    "sources_used": ["heuristics", "vision_llm", "text_llm"],
-    "fusion_enabled": true
-  }
-}
-```
-
-### GET /health
-
-Health check endpoint.
+Example:
 
 ```bash
-curl http://localhost:8000/health
+curl -X POST "http://localhost:8000/classify?use_text_llm=true&fusion_strategy=adaptive" \
+  -F "file=@document.pdf"
 ```
 
-### GET /subcategories
+Representative response fields:
 
-List all subcategory definitions.
+- `best_match`: top candidate after heuristics-only scoring or fusion
+- `all_candidates`: full ranked list
+- `feature_details`: feature-level evidence and excerpts
+- `rationale`: direct explanation for the candidate
+- `contrastive_rationale`: why the winner beat nearby alternatives
+- `fusion`: weights, agreement score, and fusion rationale
+
+## Recommended Fusion Defaults
+
+Recommended production default:
+
+- `fusion_strategy=adaptive`
+- `heuristics_alpha=0.5`
+
+Why:
+
+- heuristics remain valuable because they are deterministic and auditable
+- LLMs remain valuable because they are stronger on short-form and semantically ambiguous material
+- `adaptive` lets the system reweight sources based on confidence instead of relying only on fixed static weights
+
+When to use each strategy:
+
+- `adaptive`: best general default for mixed production traffic
+- `weighted`: best for controlled evaluation and reproducible comparisons
+- `agreement`: useful when multiple model sources are active and consensus should matter more
+- `cascade`: best when latency or inference cost matters and heuristics often resolve the easy cases
+
+Practical guidance for `heuristics_alpha`:
+
+- `0.6`: more conservative and heuristic-led
+- `0.5`: balanced default
+- `0.4`: more LLM-led, useful for short flyers, newsletters, and visually formatted material
+
+### `GET /subcategories`
+
+Returns the active document subcategories together with their criteria metadata. This is useful for UI configuration, documentation generation, and debugging explainability output.
+
+### `GET /health`
+
+Returns service and model configuration status.
+
+Operational note:
+
+- `/health` is intentionally left unauthenticated so Docker and other health checks can probe the service without Basic Auth credentials
+
+### `GET /docs`
+
+Swagger UI for interactive API testing.
+
+## Local Setup
+
+### Standalone
+
+System packages required for full PDF and OCR support:
 
 ```bash
-curl http://localhost:8000/subcategories
+sudo apt-get update
+sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng
 ```
 
-### GET /docs
+Optional:
 
-Interactive Swagger UI documentation.
+- install additional Tesseract language packs if multilingual OCR is required
 
-Visit: `http://localhost:8000/docs`
+Python setup:
 
-## Fusion Strategies
-
-| Strategy | Description | Best For |
-|----------|-------------|----------|
-| `weighted` | Static weights based on `heuristics_alpha` | Known trust levels |
-| `adaptive` | Dynamic weights based on confidence | **Recommended default** |
-| `agreement` | Bonus weight for sources that agree | Multiple LLMs available |
-| `cascade` | Heuristics first, LLM fallback | Speed priority |
-
-## Heuristics Alpha Guide
-
-| Alpha | Heuristics | LLM | Use Case |
-|-------|------------|-----|----------|
-| 0.0 | 0% | 100% | Trust LLM completely |
-| 0.3 | 30% | 70% | LLM preferred |
-| **0.4** | **40%** | **60%** | **Balanced (default)** |
-| 0.5 | 50% | 50% | Equal weight |
-| 0.7 | 70% | 30% | Heuristics preferred |
-| 1.0 | 100% | 0% | Heuristics only |
-
-## 11 Subcategories
-
-| ID | Name | Parent Type | Detected By |
-|----|------|-------------|-------------|
-| Zyvdw7E2 | Journal article | scientific_research | IMRaD structure, peer review markers, citations |
-| arQwir9z | Conference proceedings | scientific_research | Conference markers, IMRaD structure |
-| P3nzEsdB | Book chapter | scientific_research | Book features, citations |
-| k6VvsRTc | Thesis | scientific_research | University markers, formal structure |
-| NBq4fMG2 | Book | scientific_research | ISBN, publisher, chapters |
-| CONSOLIDATED_TECH_REPORT | Technical Report | deliverable_report | Deliverable markers, version control |
-| 4NLQdUhM | Tutorial | educational | Tutorial structure, learning objectives |
-| CONSOLIDATED_GUIDE_MANUAL | Guide/Manual | practice_oriented | Procedure steps, materials, safety |
-| CONSOLIDATED_PRESENTATION | Presentation | educational | Slide indicators, visual layout |
-| CONSOLIDATED_NEWS_COMM | News & Communication | policy_guidance | News timeliness, press format |
-| CONSOLIDATED_INFO_BOOKLET | Informational Booklet | practice_oriented | Short form, promotional content |
-
-## Vision Model Sliding Window
-
-For documents > 8 pages (InternVL limit), the vision model uses sliding windows:
-
-```
-Window 1: pages 1-4
-Window 2: pages 3-6  (overlap 2)
-Window 3: pages 5-8  (overlap 2)
-Window 4: pages 7-10
-...
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.sample .env
 ```
 
-Results from all windows are weighted-averaged by confidence.
+Minimal `.env` for local heuristics-only use:
 
-## Testing
+```bash
+HOST=0.0.0.0
+PORT=8000
+WORKERS=1
+
+DOCINT_AUTH_USERS=
+DOCINT_AUTH_PASSWORD=
+```
+
+Add these variables only if text LLM classification should be enabled:
+
+```bash
+DOCINT_LLM_BASE_URL=https://your-qwen-server.com/v1
+DOCINT_LLM_MODEL=qwen3-30b-a3b-awq
+DOCINT_LLM_API_KEY=your-key
+```
+
+Add these variables only if vision classification should be enabled:
+
+```bash
+VISION_LLM_BASE_URL=https://your-internvl-server.com/v1
+VISION_LLM_MODEL=internvl3-5-14b
+VISION_LLM_API_KEY=your-key
+```
+
+Start the service with one of:
+
+```bash
+./start_server.sh
+```
+
+```bash
+python start_server.py
+```
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The API will be available at `http://localhost:8000`.
+
+### Docker Compose
+
+The repository includes a local Compose file at [docker-compose.yml](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docker-compose.yml).
+
+Basic flow:
+
+```bash
+cp .env.sample .env
+docker compose up --build
+```
+
+The service will be exposed on `http://localhost:8000`.
+
+For local testing, leaving `DOCINT_AUTH_USERS` and `DOCINT_AUTH_PASSWORD` empty is the simplest option. If Basic Auth is enabled, `/health` still remains public for container and load-balancer health checks.
+
+### Docker Without Compose
+
+Build:
+
+```bash
+docker build -t ko-classifier:local .
+```
+
+Run:
+
+```bash
+docker run --rm -p 8000:8000 --env-file .env ko-classifier:local
+```
+
+## Classifier Behavior Notes
+
+- Heuristics are deterministic and comparatively fast.
+- Most latency comes from remote LLM calls, not from local feature extraction.
+- `cascade` fusion is the most practical speed-oriented option when heuristics are often decisive.
+- The vision model uses a sliding window for longer PDFs.
+- Text and vision prompts are aligned with the same criteria vocabulary used by heuristics.
+
+## Project Structure
+
+- [app.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/app.py): FastAPI app and response shaping
+- [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py): active subcategory source of truth
+- [docint/rubrics/subcategory_scorer.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategory_scorer.py): heuristic scoring engine
+- [docint/llm/subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/llm/subcategory_classify.py): text and vision LLM classification
+- [docint/fusion/intelligent_fusion.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/fusion/intelligent_fusion.py): fusion strategies
+- [data_model/](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model): taxonomy, consolidation, and category policy documents
+
+## Verification
+
+Quick compile check:
+
+```bash
+python3 -m py_compile app.py docint/rubrics/subcategories.py docint/rubrics/subcategory_scorer.py docint/llm/subcategory_classify.py
+```
+
+Basic API test script:
 
 ```bash
 python test_api.py
 ```
-
-Runs comprehensive tests including:
-- Auth rejection without credentials
-- Auth acceptance with valid credentials
-- Heuristics-only classification
-- Text LLM fusion
-- Vision LLM fusion
-- Adaptive fusion with multiple sources
-
-## Performance
-
-| Operation | Typical Time |
-|-----------|--------------|
-| Text extraction | 50-200ms |
-| OCR fallback (if needed) | 1-5s |
-| Heuristics scoring | 50-100ms |
-| Text LLM | 2-5s |
-| Vision LLM | 5-15s |
-| Fusion | < 10ms |
-
-## Project Structure
-
-```
-doc_classifier/
-├── app.py                    # FastAPI application
-├── requirements.txt          # Dependencies
-├── .env                      # Configuration (not committed)
-├── docint/                   # Core library
-│   ├── extract/              # PDF/OCR extraction
-│   ├── features/             # Feature extraction
-│   ├── rubrics/              # Scoring rubrics
-│   ├── llm/                  # LLM integration
-│   └── fusion/               # Intelligent fusion
-├── data_model/               # Subcategory definitions
-└── files/                    # Test files
-```
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design.
-
-## License
-
-EU-FarmBook Project

@@ -1,6 +1,6 @@
 # app.py
 """
-Doc Classifier API - FastAPI application for document subcategory classification.
+KO Classifier API - FastAPI application for document subcategory classification.
 
 This API provides evidence-based document classification with optional LLM enhancement.
 It supports both text-based (Qwen) and vision-based (InternVL) LLMs with intelligent
@@ -35,7 +35,7 @@ from docint.rubrics.deliverable import score_deliverable
 from docint.rubrics.pedagogy import score_pedagogy
 from docint.rubrics.procedure import score_procedure
 from docint.rubrics.subcategory_scorer import score_subcategories, SubcategoryScore
-from docint.rubrics.subcategories import SUBCATEGORIES
+from docint.rubrics.subcategories import SUBCATEGORIES, get_subcategory_criteria
 from docint.fusion.intelligent_fusion import (
     intelligent_fusion, 
     SourceResult, 
@@ -116,7 +116,7 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password",
-            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+            headers={"WWW-Authenticate": 'Basic realm="KO Classifier API"'},
         )
     
     # Verify password using constant-time comparison
@@ -124,7 +124,7 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password",
-            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+            headers={"WWW-Authenticate": 'Basic realm="KO Classifier API"'},
         )
     
     return credentials.username
@@ -165,6 +165,11 @@ class SubcategoryCandidate(BaseModel):
     features_found: List[str]
     feature_details: Dict[str, FeatureEvidence]
     rationale: str
+    contrastive_rationale: Optional[str] = None
+    selection_basis: Optional[str] = None
+    supporting_sources: Optional[List[str]] = None
+    source_confidences: Optional[Dict[str, float]] = None
+    source_rationales: Optional[Dict[str, str]] = None
     rank: int = Field(..., description="Rank by confidence (1 = best match)")
 
 
@@ -203,7 +208,7 @@ class ClassificationResponse(BaseModel):
 # =============================================================================
 
 app = FastAPI(
-    title="Doc Classifier API",
+    title="KO Classifier API",
     description="""
     Evidence-based document subcategory classification with intelligent LLM fusion.
     
@@ -279,6 +284,152 @@ def build_probability_distribution(
             c.probability = round(c.probability / total_prob, 4)
     
     return candidates
+
+
+def _candidate_missing_features(candidate: SubcategoryCandidate) -> List[str]:
+    """List expected features for a candidate that were not detected."""
+    missing: List[str] = []
+    for feat_name, evidence in candidate.feature_details.items():
+        if not evidence.detected:
+            missing.append(feat_name)
+    return missing
+
+
+def _criteria_by_name() -> Dict[str, Dict[str, Any]]:
+    criteria = {}
+    for item in get_subcategory_criteria().values():
+        criteria[item["name"]] = item
+    return criteria
+
+
+def _subcategory_key_by_name() -> Dict[str, str]:
+    return {subcat.name: key for key, subcat in SUBCATEGORIES.items()}
+
+
+def add_fusion_explanations(
+    candidates: List[SubcategoryCandidate],
+    fusion_result: Any,
+    source_results: Dict[str, Any],
+) -> None:
+    """Annotate fused candidates with source-aware explanations."""
+    if not candidates:
+        return
+
+    key_by_name = _subcategory_key_by_name()
+    name_by_key = {key: subcat.name for key, subcat in SUBCATEGORIES.items()}
+
+    for cand in candidates:
+        cand.selection_basis = "fusion"
+        subcat_key = key_by_name.get(cand.subcategory_name, cand.subcategory_name)
+
+        source_confidences: Dict[str, float] = {}
+        source_rationales: Dict[str, str] = {}
+        supporting_sources: List[str] = []
+
+        for source_name, source in source_results.items():
+            if not source:
+                continue
+            source_confidences[source_name] = round(source.confidence, 4)
+            if getattr(source, "rationale", None):
+                source_rationales[source_name] = source.rationale
+
+            source_top_key = getattr(source, "subcategory_key", "")
+            source_prob = round(source.probs.get(subcat_key, 0.0), 4)
+            if source_top_key == subcat_key or source_prob >= 0.2:
+                supporting_sources.append(source_name)
+
+        cand.supporting_sources = supporting_sources or None
+        cand.source_confidences = source_confidences or None
+        cand.source_rationales = source_rationales or None
+
+        if cand.rank != 1:
+            continue
+
+        source_summaries: List[str] = []
+        for source_name, source in source_results.items():
+            if not source:
+                continue
+            source_top_key = getattr(source, "subcategory_key", "")
+            source_top_name = name_by_key.get(source_top_key, source_top_key)
+            source_summaries.append(
+                f"{source_name} favored {source_top_name} ({source.confidence:.2f})"
+            )
+
+        fused_bits = [
+            f"Fused result selected {cand.subcategory_name} with probability {cand.probability:.2f}.",
+        ]
+        if supporting_sources:
+            fused_bits.append(
+                "Supporting sources: " + ", ".join(supporting_sources) + "."
+            )
+        if source_summaries:
+            fused_bits.append("Source summary: " + "; ".join(source_summaries) + ".")
+        if fusion_result and getattr(fusion_result, "rationale", None):
+            fused_bits.append(fusion_result.rationale)
+
+        cand.rationale = " ".join(fused_bits)
+
+
+def add_contrastive_rationales(candidates: List[SubcategoryCandidate], top_k: int = 3) -> None:
+    """
+    Add a short contrastive explanation for the top candidates so the response
+    states not only what won, but what close alternatives were missing.
+    """
+    if len(candidates) < 2:
+        return
+
+    criteria_by_name = _criteria_by_name()
+    focus = candidates[:max(2, min(top_k, len(candidates)))]
+    winner = focus[0]
+    winner_feats = set(winner.features_found)
+    winner_criteria = criteria_by_name.get(winner.subcategory_name, {})
+
+    contrasts: List[str] = []
+    for alt in focus[1:]:
+        alt_feats = set(alt.features_found)
+        winner_adv = sorted(winner_feats - alt_feats)
+        alt_missing = _candidate_missing_features(alt)
+        alt_criteria = criteria_by_name.get(alt.subcategory_name, {})
+
+        pieces: List[str] = []
+        if winner_adv:
+            pieces.append(f"stronger on {', '.join(winner_adv[:2])}")
+        elif winner_criteria.get("positive_signal_hints"):
+            pieces.append(
+                "better matches "
+                + ", ".join(winner_criteria["positive_signal_hints"][:2])
+            )
+        if alt_missing:
+            pieces.append(f"{alt.subcategory_name} missing {', '.join(alt_missing[:2])}")
+        elif alt_criteria.get("negative_signal_hints"):
+            pieces.append(
+                f"{alt.subcategory_name} conflicted with "
+                + ", ".join(alt_criteria["negative_signal_hints"][:1])
+            )
+        if not pieces:
+            pieces.append(f"higher overall evidence than {alt.subcategory_name}")
+
+        contrasts.append(f"vs {alt.subcategory_name}: " + "; ".join(pieces))
+
+    if contrasts:
+        winner.contrastive_rationale = " | ".join(contrasts)
+
+    # Add a compact note for near-miss alternatives too.
+    for idx, cand in enumerate(focus[1:], start=1):
+        missing = _candidate_missing_features(cand)
+        cand_criteria = criteria_by_name.get(cand.subcategory_name, {})
+        if missing:
+            cand.contrastive_rationale = (
+                f"Near miss behind {winner.subcategory_name}; missing "
+                f"{', '.join(missing[:3])}"
+            )
+        elif cand_criteria.get("negative_signal_hints"):
+            cand.contrastive_rationale = (
+                f"Near miss behind {winner.subcategory_name}; conflicted with "
+                f"{cand_criteria['negative_signal_hints'][0]}"
+            )
+        else:
+            cand.contrastive_rationale = f"Near miss behind {winner.subcategory_name}"
 
 
 def classify_document(
@@ -358,12 +509,19 @@ def classify_document(
     )
     
     candidates = build_probability_distribution(all_scores)
+    add_contrastive_rationales(candidates)
     best_candidate = candidates[0] if candidates else None
+    heuristics_best = best_candidate.model_copy(deep=True) if best_candidate else None
+    final_candidates = [c.model_copy(deep=True) for c in candidates]
+    key_by_name = _subcategory_key_by_name()
     
     # Convert heuristics to SourceResult for fusion
-    heuristics_probs = {c.subcategory_name: c.probability for c in candidates}
+    heuristics_probs = {
+        key_by_name.get(c.subcategory_name, c.subcategory_name): c.probability
+        for c in candidates
+    }
     heuristics_source = convert_to_source_result(
-        subcategory_key=best_candidate.subcategory_name if best_candidate else "",
+        subcategory_key=key_by_name.get(best_candidate.subcategory_name, "") if best_candidate else "",
         confidence=best_candidate.confidence if best_candidate else 0.0,
         probs=heuristics_probs,
         source_name="heuristics",
@@ -444,8 +602,7 @@ def classify_document(
     
     # 6) Intelligent fusion if multiple sources
     fusion_info = None
-    final_best = best_candidate
-    final_candidates = candidates
+    final_best = final_candidates[0] if final_candidates else None
     
     sources_for_fusion = [heuristics_source]
     if vision_source:
@@ -480,16 +637,30 @@ def classify_document(
             rationale=fusion_result.rationale,
         )
         
-        # Re-rank candidates based on fusion probabilities
-        for c in candidates:
-            c.probability = round(fusion_result.probs.get(c.subcategory_name, 0), 4)
-        
+        # Re-rank candidates based on fusion probabilities. Fusion stores
+        # probabilities by internal subcategory key, not display name.
+        for c in final_candidates:
+            subcat_key = key_by_name.get(c.subcategory_name, c.subcategory_name)
+            fused_prob = round(fusion_result.probs.get(subcat_key, 0), 4)
+            c.probability = fused_prob
+            c.confidence = fused_prob
+
         # Sort by new probabilities
-        candidates.sort(key=lambda x: x.probability, reverse=True)
-        for i, c in enumerate(candidates, 1):
+        final_candidates.sort(key=lambda x: x.probability, reverse=True)
+        for i, c in enumerate(final_candidates, 1):
             c.rank = i
-        
-        final_best = candidates[0]
+        add_fusion_explanations(
+            final_candidates,
+            fusion_result,
+            {
+                "heuristics": heuristics_source,
+                "vision_llm": vision_source,
+                "text_llm": text_source,
+            },
+        )
+        add_contrastive_rationales(final_candidates)
+
+        final_best = final_candidates[0]
     
     threshold_met = final_best.confidence >= 0.35 if final_best else False
     
@@ -497,12 +668,12 @@ def classify_document(
     
     return ClassificationResponse(
         best_match=final_best,
-        all_candidates=candidates,
+        all_candidates=final_candidates,
         fusion=fusion_info,
-        heuristics=best_candidate,
+        heuristics=heuristics_best,
         vision_llm=llm_results.get("vision"),
         text_llm=llm_results.get("text"),
-        total_candidates=len(candidates),
+        total_candidates=len(final_candidates),
         confidence_threshold_met=threshold_met,
         document_info={
             "filename": filename,
@@ -553,7 +724,7 @@ async def auth_middleware(request, call_next):
     if not auth_header or not auth_header.startswith("Basic "):
         return JSONResponse(
             status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+            headers={"WWW-Authenticate": 'Basic realm="KO Classifier API"'},
             content={"detail": "Authentication required"},
         )
     
@@ -569,7 +740,7 @@ async def auth_middleware(request, call_next):
         if stored_password is None or not secrets.compare_digest(password, stored_password):
             return JSONResponse(
                 status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+                headers={"WWW-Authenticate": 'Basic realm="KO Classifier API"'},
                 content={"detail": "Invalid credentials"},
             )
         
@@ -579,7 +750,7 @@ async def auth_middleware(request, call_next):
     except Exception:
         return JSONResponse(
             status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Doc Classifier API"'},
+            headers={"WWW-Authenticate": 'Basic realm="KO Classifier API"'},
             content={"detail": "Invalid authentication format"},
         )
     
@@ -591,7 +762,7 @@ async def root(request: Request):
     """Root endpoint with API info."""
     username = getattr(request.state, 'username', 'anonymous')
     return {
-        "name": "Doc Classifier API",
+        "name": "KO Classifier API",
         "version": "2.0.0",
         "authenticated_user": username,
         "auth_enabled": AUTH_ENABLED,
@@ -699,7 +870,8 @@ async def classify_endpoint(
 async def list_subcategories(request: Request):
     """List all subcategory definitions."""
     from docint.rubrics.subcategories import get_all_detectable_features
-    
+    criteria = get_subcategory_criteria()
+
     subcats = {}
     for key, subcat in SUBCATEGORIES.items():
         subcats[key] = {
@@ -708,6 +880,7 @@ async def list_subcategories(request: Request):
             "description": subcat.description,
             "parent_type": subcat.parent_type.value,
             "features": [f.name for f in subcat.detectable_features],
+            "criteria": criteria.get(key),
         }
     
     return {

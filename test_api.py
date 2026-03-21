@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for Doc Classifier API v2.0 with Basic Auth
+Test script for KO Classifier API v2.0 with Basic Auth
 
 Tests health, subcategories, and classification with various fusion options.
 """
@@ -52,7 +52,7 @@ def test_wrong_auth():
 def test_health():
     """Test health endpoint."""
     print("Testing /health endpoint...")
-    resp = client.get("/health", auth=(AUTH_USER, AUTH_PASSWORD))
+    resp = client.get("/health")
     print(f"  Status: {resp.status_code}")
     
     if resp.status_code != 200:
@@ -147,7 +147,7 @@ def test_classify(pdf_path: str, options: dict, label: str):
 def main():
     """Run all tests."""
     print("=" * 70)
-    print("Doc Classifier API v2.0 Test Suite")
+    print("KO Classifier API v2.0 Test Suite")
     print("=" * 70)
     print(f"Auth User: {AUTH_USER}")
     print()

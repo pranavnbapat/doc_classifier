@@ -91,6 +91,7 @@ class ExtractionContext:
     # Extracted signals (populated by feature extractors)
     signals: Dict[str, Any] = field(default_factory=dict)
     excerpts: Dict[str, List[str]] = field(default_factory=lambda: defaultdict(list))
+    feature_cache: Dict[str, "FeatureEvidence"] = field(default_factory=dict)
     
     def get_signal(self, key: str, default: Any = None) -> Any:
         return self.signals.get(key, default)
@@ -192,7 +193,9 @@ class FeatureExtractors:
             if found:
                 matches.extend(found[:2])
                 score += len(found) * 0.15
-        score = min(1.0, score + 0.2)  # Base boost for any match
+        if matches:
+            score += 0.2  # Small base boost only when conference evidence exists
+        score = min(1.0, score)
         return (score, len(matches), matches[:3])
     
     @staticmethod
@@ -216,7 +219,9 @@ class FeatureExtractors:
             if found:
                 matches.extend(found[:2])
                 score += len(found) * 0.12
-        score = min(1.0, score + 0.1)
+        if matches:
+            score += 0.1
+        score = min(1.0, score)
         return (score, len(matches), matches[:3])
     
     @staticmethod
@@ -248,6 +253,7 @@ class FeatureExtractors:
         """Extract EU project deliverable markers."""
         patterns = [
             r'\bdeliverable\b',
+            r'\bd\d+\.\d+(?:\.\d+)?\b',
             r'\bwork package\b',
             r'\btask\s+\d+\.?\d*\b',
             r'\bmilestone\b',
@@ -258,6 +264,7 @@ class FeatureExtractors:
             r'\bdissemination level\b',
             r'\bproject acronym\b',
             r'\bwp\d+\b',
+            r'\binterreg\b',
         ]
         score = ctx.deliverable_score * 0.5  # Use existing score as base
         matches = []
@@ -299,6 +306,9 @@ class FeatureExtractors:
             r'\btechnical parameters?\b',
             r'\bperformance criteria\b',
             r'\bfunctional requirements?\b',
+            r'\btechnology description\b',
+            r'\bproduct characteristics\b',
+            r'\bagronomic aspects\b',
         ]
         score = 0.0
         matches = []
@@ -328,10 +338,26 @@ class FeatureExtractors:
                 excerpts.append("Appendix detected")
             if has_refs:
                 score += 0.2
+
+            if ctx.sections.present.get('introduction', False):
+                score += 0.1
+                excerpts.append("Introduction detected")
+            if ctx.sections.present.get('conclusions', False):
+                score += 0.1
+                excerpts.append("Conclusions detected")
             
             section_count = sum(1 for v in ctx.sections.present.values() if v)
             score += min(0.3, section_count * 0.05)
+
+        top_text = "\n".join(ctx.lines[:25]).lower()
+        if re.search(r'^\s*contents\s*$', top_text, re.M):
+            score += 0.2
+            excerpts.append("Contents page detected")
+        if re.search(r'\bassessment report\b|\breport of\b|\bdeliverable\s+\d', top_text, re.I):
+            score += 0.12
+            excerpts.append("Report-style cover/title framing detected")
         
+        score = min(1.0, score)
         return (score, score, excerpts)
     
     @staticmethod
@@ -488,6 +514,12 @@ class FeatureExtractors:
             r'\bissue\s*\d+\b',
             r'\bthis month\b',
             r'\bthis week\b',
+            r'\bannounced?\b',
+            r'\bupdate\b',
+            r'\bnew\b',
+            r'\beffective\s+(from|on)\b',
+            r'\benter(s|ed)? into force\b',
+            r'\bpublished on\b',
         ]
         score = 0.0
         matches = []
@@ -495,19 +527,88 @@ class FeatureExtractors:
             found = re.findall(pat, ctx.text_lower, re.I)
             if found:
                 matches.extend(found[:2])
-                score += len(found) * 0.2
+                score += len(found) * 0.12
+        
+        # Dense date usage is a strong signal for time-sensitive communication.
+        date_hits = len(re.findall(
+            r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|'
+            r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4}|'
+            r'\d{4})\b',
+            ctx.text_lower,
+            re.I,
+        ))
+        if date_hits >= 3:
+            score += min(0.35, date_hits * 0.03)
+        
         score = min(1.0, score)
-        return (score, len(matches), matches[:3])
+        raw_value = {"matches": len(matches), "date_mentions": date_hits}
+        return (score, raw_value, matches[:3])
     
     @staticmethod
     def extract_press_release_signals(ctx: ExtractionContext) -> Tuple[float, Any, List[str]]:
         """Extract press release format markers."""
-        patterns = [
+        score = 0.0
+        matches = []
+
+        strong_patterns = [
+            r'\bfor immediate release\b',
+            r'\bmedia contact\b',
+            r'\bpress release\b',
+            r'\bcontact point\b',
+        ]
+        weak_patterns = [
             r'\bfor more information\b',
             r'\bcontact\s*:',
-            r'\bmedia contact\b',
             r'\babout\s+\w+\b',
-            r'\b###\s*$',  # End marker
+            r'\b###\s*$',
+            r'\bwritten by\b',
+            r'\bauthor\b',
+            r'\bpublished on\b',
+        ]
+
+        for pat in strong_patterns:
+            found = re.findall(pat, ctx.text_lower, re.I)
+            if found:
+                matches.extend(found[:2])
+                score += len(found) * 0.22
+
+        for pat in weak_patterns:
+            found = re.findall(pat, ctx.text_lower, re.I)
+            if found:
+                matches.extend(found[:2])
+                score += len(found) * 0.08
+        
+        # Common byline/date lines often appear near the top of communication pieces.
+        top_lines = ctx.lines[:12]
+        byline_hits = 0
+        for ln in top_lines:
+            if re.search(r'\b(for immediate release|contact point|media contact|written by|author)\b', ln, re.I):
+                byline_hits += 1
+            if re.search(r'^[A-Z][A-Za-z .-]+,\s+[A-Z][A-Za-z .-]+\s+[–-]\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{4}', ln, re.I):
+                byline_hits += 2
+            if re.search(r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4})\b', ln, re.I):
+                byline_hits += 1
+        if byline_hits:
+            score += min(0.25, byline_hits * 0.08)
+        
+        score = min(1.0, score)
+        raw_value = {"matches": len(matches), "top_line_hits": byline_hits}
+        return (score, raw_value, matches[:3])
+
+    @staticmethod
+    def extract_regulatory_update_signals(ctx: ExtractionContext) -> Tuple[float, Any, List[str]]:
+        """Extract legal/policy update framing commonly seen in newsletters and policy briefs."""
+        patterns = [
+            r'\bnew regulation\b',
+            r'\bnew rules?\b',
+            r'\bpolicy update\b',
+            r'\bcomes? into force\b',
+            r'\beffective\s+(from|on)\b',
+            r'\badopted\b',
+            r'\bapproved\b',
+            r'\bentered into force\b',
+            r'\bimplementation date\b',
+            r'\bregulatory changes?\b',
         ]
         score = 0.0
         matches = []
@@ -515,7 +616,7 @@ class FeatureExtractors:
             found = re.findall(pat, ctx.text_lower, re.I)
             if found:
                 matches.extend(found[:2])
-                score += len(found) * 0.2
+                score += len(found) * 0.18
         score = min(1.0, score)
         return (score, len(matches), matches[:3])
     
@@ -534,7 +635,7 @@ class FeatureExtractors:
     
     @staticmethod
     def extract_promotional_signals(ctx: ExtractionContext) -> Tuple[float, Any, List[str]]:
-        """Extract promotional content markers."""
+        """Extract outreach/promotional booklet markers."""
         patterns = [
             r'\blearn more\b',
             r'\bcontact us\b',
@@ -543,6 +644,17 @@ class FeatureExtractors:
             r'\boffer\b',
             r'\bdiscover\b',
             r'\bdownload\b',
+            r'\bfactsheet\b',
+            r'\bbrochure\b',
+            r'\bleaflet\b',
+            r'\bflyer\b',
+            r'\bfor more info\b',
+            r'\bfor more information\b',
+            r'\bwebsite\b',
+            r'\bfollow\s+\w+\s+on social media\b',
+            r'\bkey challenges\b',
+            r'\bpotential products\b',
+            r'\bbenefits of\b',
         ]
         score = 0.0
         matches = []
@@ -551,6 +663,9 @@ class FeatureExtractors:
             if found:
                 matches.extend(found[:2])
                 score += len(found) * 0.1
+        if re.search(r'https?://|www\.', ctx.text_lower, re.I):
+            score += 0.08
+            matches.append("website_url")
         score = min(1.0, score)
         return (score, len(matches), matches[:3])
     
@@ -602,6 +717,10 @@ class FeatureExtractors:
             r'\bguidelines\b',
             r'\bmandatory\b',
             r'\brecommended\b',
+            r'\bdecree\b',
+            r'\blaw\b',
+            r'\borderinance\b',
+            r'\barticle\s+\d+\b',
         ]
         score = 0.0
         matches = []
@@ -623,6 +742,12 @@ class FeatureExtractors:
             r'\bregulatory\b',
             r'\bstandard\s*:',
             r'\biso\s*\d+',
+            r'\bgovernment\b',
+            r'\bministry\b',
+            r'\bcommission\b',
+            r'\bparliament\b',
+            r'\bauthority\b',
+            r'\bagency\b',
         ]
         score = 0.0
         matches = []
@@ -657,6 +782,7 @@ EXTRACTOR_MAP: Dict[str, Callable] = {
     "checklist_signals": FeatureExtractors.extract_checklist_signals,
     "news_signals": FeatureExtractors.extract_news_signals,
     "press_release_signals": FeatureExtractors.extract_press_release_signals,
+    "regulatory_update_signals": FeatureExtractors.extract_regulatory_update_signals,
     "page_count_features": FeatureExtractors.extract_page_count_features,
     "promotional_signals": FeatureExtractors.extract_promotional_signals,
     "slide_signals": FeatureExtractors.extract_slide_signals,
@@ -704,26 +830,163 @@ class SubcategoryClassifier:
     
     def extract_feature(self, ctx: ExtractionContext, feature_name: str) -> FeatureEvidence:
         """Extract a single feature using the appropriate extractor."""
+        if feature_name in ctx.feature_cache:
+            return ctx.feature_cache[feature_name]
+
         extractor = self.extractors.get(feature_name)
         if not extractor:
-            return FeatureEvidence(
+            evidence = FeatureEvidence(
                 feature_name=feature_name,
                 detected=False,
                 score=0.0,
                 raw_value=None,
                 excerpts=[]
             )
+            ctx.feature_cache[feature_name] = evidence
+            return evidence
         
         score, raw_value, excerpts = extractor(ctx)
         detected = score > 0.2  # Threshold for detection
         
-        return FeatureEvidence(
+        evidence = FeatureEvidence(
             feature_name=feature_name,
             detected=detected,
             score=score,
             raw_value=raw_value,
             excerpts=excerpts
         )
+        ctx.feature_cache[feature_name] = evidence
+        return evidence
+
+    def _subcategory_penalty(
+        self,
+        ctx: ExtractionContext,
+        subcat_key: str,
+        feature_details: Dict[str, FeatureEvidence],
+    ) -> Tuple[float, List[str]]:
+        """
+        Apply lightweight negative evidence when a candidate lacks expected cues
+        or shows stronger cues for a neighboring class.
+        """
+        penalty = 0.0
+        reasons: List[str] = []
+
+        def feat(extractor_key: str) -> FeatureEvidence:
+            return self.extract_feature(ctx, extractor_key)
+
+        slide = feature_details.get("slide_indicators") or feat("slide_signals")
+        visual = feature_details.get("visual_heavy") or feat("visual_features")
+        short_form = feature_details.get("short_form") or feat("page_count_features")
+        promo = feature_details.get("promotional_content") or feat("promotional_signals")
+        deliverable = feature_details.get("deliverable_markers") or feat("deliverable_signals")
+        version = feature_details.get("version_control") or feat("version_signals")
+        technical = feature_details.get("technical_specs") or feat("technical_signals")
+        formal = feature_details.get("formal_structure") or feat("formal_structure_score")
+        news = feat("news_signals")
+        press = feat("press_release_signals")
+        regulatory = feat("regulatory_update_signals")
+        policy = feat("policy_signals")
+        governance = feat("governance_signals")
+
+        policy_strength = max(news.score, press.score, regulatory.score, policy.score, governance.score)
+
+        if subcat_key == "presentation":
+            # Short visual PDFs often look like presentations; require stronger evidence.
+            if slide.score < 0.2:
+                penalty += 0.18
+                reasons.append("missing_slide_markers")
+            if policy_strength >= 0.28:
+                penalty += 0.14
+                reasons.append("policy_news_signals_fit_better_than_presentation")
+
+        elif subcat_key == "informational_booklet":
+            if policy_strength >= 0.28:
+                penalty += 0.20
+                reasons.append("policy_news_signals_fit_better_than_booklet")
+            if promo.score < 0.12 and press.score < 0.12 and news.score < 0.12 and regulatory.score < 0.12:
+                penalty += 0.04
+                reasons.append("weak_booklet_specific_signals")
+
+        elif subcat_key == "technical_report":
+            report_signal_strength = max(deliverable.score, version.score, technical.score, formal.score)
+            if short_form.score > 0 and report_signal_strength < 0.2:
+                penalty += 0.22
+                reasons.append("short_form_without_report_cues")
+            if short_form.score > 0 and visual.score >= 0.25 and formal.score < 0.1:
+                penalty += 0.10
+                reasons.append("brochure_layout_fit_better_than_report")
+            if promo.score >= 0.18 and deliverable.score < 0.2 and version.score < 0.2:
+                penalty += 0.08
+                reasons.append("outreach_signals_fit_better_than_report")
+
+        elif subcat_key == "news_communication":
+            # Communication pieces benefit from short form; penalize very long items.
+            if short_form.score <= 0.0:
+                penalty += 0.08
+                reasons.append("not_short_form")
+            # If none of the communication/policy markers fire, keep score conservative.
+            if policy_strength < 0.18:
+                penalty += 0.06
+                reasons.append("weak_news_policy_signals")
+            if governance.score >= 0.25 and max(news.score, press.score, regulatory.score, policy.score) < 0.12:
+                penalty += 0.16
+                reasons.append("institutional_references_without_news_frame")
+
+        elif subcat_key == "guide_manual":
+            if slide.score >= 0.25 and visual.score >= 0.4:
+                penalty += 0.08
+                reasons.append("presentation_signals_fit_better_than_manual")
+
+        elif subcat_key == "tutorial":
+            if visual.score >= 0.45 and slide.score >= 0.25 and feature_details.get("tutorial_structure", feat("tutorial_signals")).score < 0.2:
+                penalty += 0.08
+                reasons.append("presentation_signals_fit_better_than_tutorial")
+
+        return min(0.35, penalty), reasons
+
+    def _subcategory_bonus(
+        self,
+        ctx: ExtractionContext,
+        subcat_key: str,
+        feature_details: Dict[str, FeatureEvidence],
+    ) -> Tuple[float, List[str]]:
+        """Apply small targeted bonuses when a consolidated class has a clear signature."""
+        bonus = 0.0
+        reasons: List[str] = []
+
+        def feat(extractor_key: str) -> FeatureEvidence:
+            return self.extract_feature(ctx, extractor_key)
+
+        short_form = feature_details.get("short_form") or feat("page_count_features")
+        news = feat("news_signals")
+        press = feat("press_release_signals")
+        regulatory = feat("regulatory_update_signals")
+        policy = feat("policy_signals")
+        governance = feat("governance_signals")
+        promo = feature_details.get("promotional_content") or feat("promotional_signals")
+
+        strong_policy_hits = sum(
+            1 for e in [news, press, regulatory, policy, governance] if e.score >= 0.2
+        )
+
+        if subcat_key == "news_communication":
+            if short_form.score > 0 and strong_policy_hits >= 2:
+                bonus += 0.08
+                reasons.append("multi_signal_news_policy_pattern")
+            if regulatory.score >= 0.2 and (policy.score >= 0.2 or governance.score >= 0.2):
+                bonus += 0.06
+                reasons.append("regulatory_update_pattern")
+
+        elif subcat_key == "informational_booklet":
+            if short_form.score > 0 and promo.score >= 0.2:
+                bonus += 0.05
+                reasons.append("short_promotional_pattern")
+            visual = feature_details.get("visual_heavy") or feat("visual_features")
+            if short_form.score > 0 and visual.score >= 0.25 and promo.score >= 0.08:
+                bonus += 0.06
+                reasons.append("short_visual_outreach_pattern")
+
+        return min(0.2, bonus), reasons
     
     def score_subcategory(
         self,
@@ -747,6 +1010,11 @@ class SubcategoryClassifier:
                 features_found.append(feat_def.name)
                 total_weighted_score += evidence.score * feat_def.weight
         
+        # Apply lightweight negative/positive evidence after positive evidence is collected.
+        penalty, penalty_reasons = self._subcategory_penalty(ctx, subcat_key, feature_details)
+        bonus, bonus_reasons = self._subcategory_bonus(ctx, subcat_key, feature_details)
+        total_weighted_score = max(0.0, total_weighted_score - penalty + bonus)
+
         # Calculate confidence
         if max_possible > 0:
             base_confidence = total_weighted_score / max_possible
@@ -765,6 +1033,10 @@ class SubcategoryClassifier:
             features_found=features_str,
             confidence=confidence
         )
+        if bonus_reasons:
+            rationale += f"; reinforced by {', '.join(bonus_reasons[:2])}"
+        if penalty_reasons:
+            rationale += f"; adjusted for {', '.join(penalty_reasons[:2])}"
         
         return SubcategoryScore(
             subcategory_id=subcat.id,

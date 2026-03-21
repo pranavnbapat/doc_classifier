@@ -26,23 +26,50 @@ SUBCAT_TYPES = list(SUBCATEGORIES.keys())
 def build_subcategory_prompt() -> str:
     """Build LLM prompt using actual subcategory definitions."""
     prompt_lines = [
-        "You are a document subcategory classifier. Classify the document into ONE of these subcategories based on its content, structure, and purpose:",
+        "You are a document subcategory classifier.",
+        "Classify the document into ONE subcategory based on observable evidence in the document.",
+        "Use the same measurable criteria vocabulary as the heuristic classifier.",
         "",
     ]
     
     for key, subcat in SUBCATEGORIES.items():
-        features_desc = ", ".join([f.name for f in subcat.detectable_features[:3]])
-        prompt_lines.append(f"- {key}: {subcat.description} (look for: {features_desc})")
+        features_desc = ", ".join([f.name for f in subcat.detectable_features])
+        prompt_lines.append(f"- {key} ({subcat.name})")
+        prompt_lines.append(f"  parent_type: {subcat.parent_type.value}")
+        prompt_lines.append(f"  description: {subcat.description}")
+        prompt_lines.append(f"  detectable_features: {features_desc}")
+        if subcat.positive_signal_hints:
+            prompt_lines.append(
+                "  positive_signals: "
+                + ", ".join(subcat.positive_signal_hints)
+            )
+        if subcat.negative_signal_hints:
+            prompt_lines.append(
+                "  negative_signals: "
+                + ", ".join(subcat.negative_signal_hints)
+            )
+        if subcat.close_competitors:
+            prompt_lines.append(
+                "  close_competitors: "
+                + ", ".join(subcat.close_competitors)
+            )
+        prompt_lines.append(
+            f"  minimum_features_required: {subcat.min_features_required}"
+        )
+        prompt_lines.append("")
     
     prompt_lines.extend([
-        "",
         "Return ONLY valid JSON with:",
         "1. 'subcategory': the key of the best matching subcategory",
         "2. 'confidence': your confidence 0.0-1.0",
-        "3. 'rationale': brief explanation citing specific evidence from the text",
-        "4. 'probs': object with probability for EACH subcategory (should sum to 1.0)",
+        "3. 'rationale': brief explanation citing specific evidence from the text or pages",
+        "4. 'matched_signals': short list of criteria-consistent signals that support the chosen class",
+        "5. 'conflicting_signals': short list of signals that create ambiguity or point elsewhere",
+        "6. 'closest_alternative': the next most plausible subcategory key",
+        "7. 'probs': object with probability for EACH subcategory (should sum to 1.0)",
         "",
-        "Be honest about uncertainty - if multiple categories seem possible, distribute probability accordingly.",
+        "Be honest about uncertainty. If multiple categories seem possible, distribute probability accordingly.",
+        "Prefer signals grounded in the supplied taxonomy, such as IMRaD structure, governance references, slide indicators, regulatory update markers, or tutorial structure.",
     ])
     
     return "\n".join(prompt_lines)
@@ -61,6 +88,9 @@ def build_schema() -> str:
   "subcategory": "one_of_the_keys_below",
   "confidence": 0.0,
   "rationale": "explanation with evidence",
+  "matched_signals": ["signal_1", "signal_2"],
+  "conflicting_signals": ["signal_1"],
+  "closest_alternative": "one_of_the_keys_below",
   "probs": {{
 {probs_template}
   }}

@@ -1,0 +1,1067 @@
+[
+  {
+    "_id": "arQwir9z",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.493Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Article in conference proceedings",
+    "description": "Academic paper presented at a conference and published in the proceedings",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "Zyvdw7E2",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.537Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Journal article",
+    "description": "Peer-reviewed academic article published in a scholarly journal",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "P3nzEsdB",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.517Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Chapter in edited volume",
+    "description": "Individual chapter contributed to an edited book or collection",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "NBq4fMG2",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.507Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Book",
+    "description": "Full-length published book or monograph",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "k6VvsRTc",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.571Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Thesis",
+    "description": "Academic dissertation or thesis submitted for a degree",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_INFO_BOOKLET",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Informational Booklet",
+    "description": "Short-form printed materials used to provide concise practical, promotional, or reference information",
+    "consolidated_from": [
+      "Booklet",
+      "Brochure",
+      "Factsheet",
+      "Flyer"
+    ],
+    "consolidated_ids": [
+      "RpTSfUT6",
+      "VvQ3Qdm9",
+      "aRoL7Fur",
+      "9a3LiuwE"
+    ],
+    "consolidation_reason": "All four are short printed information carriers differentiated mainly by layout and marketing nuance rather than by a materially different knowledge-object type.",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_GUIDE_MANUAL",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Guide/Manual",
+    "description": "Reference-oriented instructional documents that explain a subject or tell the reader how to perform a task",
+    "consolidated_from": [
+      "Handbook",
+      "Manual",
+      "Guide"
+    ],
+    "consolidated_ids": [
+      "WjkJZNfW",
+      "3a8k4LGX",
+      "HwgP7sNd"
+    ],
+    "consolidation_reason": "'Handbook', 'manual', and document-form 'guide' are near-synonyms in practice. Keeping them separate forces uploaders to make arbitrary wording choices rather than meaningful classification decisions.",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "4NLQdUhM",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.574Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Tutorial",
+    "description": "Step-by-step instructional content showing how to perform a task or learn a process",
+    "note": "Unified across document, video, and audio because the defining trait is step-by-step instructional intent, not medium.",
+    "parent_category": [
+      "Document",
+      "Video",
+      "Audio"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW",
+      "H4AQkKXG",
+      "53DSgGhE"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_TECH_REPORT",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Technical Report",
+    "description": "Formal technical or project documentation, including reviews, specifications, and evidence-backed reports",
+    "consolidated_from": [
+      "Deliverable report",
+      "Milestone report",
+      "Report/paper",
+      "Review document",
+      "Technical/technology article",
+      "Technical information/specifications card"
+    ],
+    "consolidated_ids": [
+      "kAMDvvGi",
+      "UGycRVbZ",
+      "253yDvmF",
+      "idoGjAvS",
+      "Prfb7z2K",
+      "hFsBgY6p"
+    ],
+    "consolidation_reason": "These six labels mostly reflect project workflow jargon, document length, or packaging. For retrieval they behave as one family of formal technical documentation.",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_PRESENTATION",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Presentation",
+    "description": "Slide-based document used to present information, recommendations, training material, or problem-solving guidance",
+    "consolidated_from": [
+      "Practice abstract",
+      "Decision-making presentation",
+      "Educational/training presentation",
+      "Informative presentation",
+      "Motivational presentation",
+      "Problem-solving presentation"
+    ],
+    "consolidated_ids": [
+      "ShccGzoK",
+      "8ec4kuG6",
+      "epgBnPkZ",
+      "EFvq4CHG",
+      "4GzG8RsA"
+    ],
+    "consolidation_reason": "The meaningful commonality is slide-based presentation format. The current distinctions are purpose labels, and one deck can easily be informative, educational, and decision-supporting at the same time.",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ],
+    "migrated_from_category": "Slideshow/Presentation",
+    "source_gap_note": "Problem-solving presentation appears in the metadata guide PDF but is missing from data_model.subcategories.json; it is nevertheless absorbed into this consolidated target."
+  },
+  {
+    "_id": "CONSOLIDATED_NEWS_COMM",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "News & Communication",
+    "description": "Short communication documents used for periodic updates, announcements, or concise policy-facing messaging",
+    "consolidated_from": [
+      "Newsletter",
+      "Press release",
+      "Policy brief"
+    ],
+    "consolidated_ids": [
+      "WTkbYLwk",
+      "cVH8FoRV",
+      "2hS9kqyF"
+    ],
+    "consolidation_reason": "These items are all concise communication artifacts optimized for update, announcement, or policy messaging rather than for deep reference use.",
+    "parent_category": [
+      "Document"
+    ],
+    "parent_category_id": [
+      "hkCpEjKW"
+    ]
+  },
+  {
+    "_id": "HoCj6HpA",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.590Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Case study",
+    "description": "Video presenting a concrete real-world case to illustrate lessons, outcomes, or general principles",
+    "parent_category": [
+      "Video"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG"
+    ]
+  },
+  {
+    "_id": "8PzAnVmU",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.593Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Documentary video",
+    "description": "Factual video presenting information about a subject in documentary form",
+    "parent_category": [
+      "Video"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_EDU_MEDIA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Educational/Training Media",
+    "description": "Audio or video content created primarily to teach, train, or explain a subject in a structured way",
+    "consolidated_from": [
+      "Educational/training video",
+      "Educational/training podcast",
+      "Guide"
+    ],
+    "consolidated_ids": [
+      "noz9EMYV",
+      "TX2UeWFy",
+      "HwgP7sNd"
+    ],
+    "consolidation_reason": "For non-document media, the practical distinction between educational/training content and guide-form content is weak. They all function as structured explanatory learning resources.",
+    "parent_category": [
+      "Video",
+      "Audio"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG",
+      "53DSgGhE"
+    ],
+    "source_note": "Guide is retained separately for documents as part of Guide/Manual; its audio/video use is absorbed here."
+  },
+  {
+    "_id": "CONSOLIDATED_RECORDED_SESSION",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Recorded Session",
+    "description": "Recording of a live or synchronous event such as a talk, webinar, seminar, or other session",
+    "consolidated_from": [
+      "Event capturing video",
+      "Presentation/live talk capturing video",
+      "Webinar",
+      "Event capturing podcast",
+      "On-demand seminar",
+      "Panel discussion"
+    ],
+    "consolidated_ids": [
+      "7v8P2n9f",
+      "fgVUSMPd",
+      "YFjiBiTo",
+      "cpZ2MJt4",
+      "bVSSHBLT",
+      "2q6TS9Gc"
+    ],
+    "consolidation_reason": "All six are session captures. They differ by channel or event label, but from a retrieval perspective users are looking for recorded talks, webinars, seminars, or discussions.",
+    "parent_category": [
+      "Video",
+      "Audio"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG",
+      "53DSgGhE"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_INTERVIEW",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Interview",
+    "description": "Recorded interview content in which one or more people answer questions or share expertise",
+    "consolidated_from": [
+      "Interview video",
+      "Interview"
+    ],
+    "consolidated_ids": [
+      "fapEdMYa",
+      "LfPMsydk"
+    ],
+    "consolidation_reason": "The semantic form is the interview itself. Splitting audio and video versions creates duplicate concepts without adding classification value.",
+    "parent_category": [
+      "Video",
+      "Audio"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG",
+      "53DSgGhE"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_PRODUCT_REVIEW",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Product Review/Testimonial",
+    "description": "Video evaluating, demonstrating, or endorsing a product, feature, service, or practical solution",
+    "consolidated_from": [
+      "Product/feature review video",
+      "Testimonial"
+    ],
+    "consolidated_ids": [
+      "dnbopCFi",
+      "TTsJLQpK"
+    ],
+    "consolidation_reason": "Both forms are evaluative or persuasive showcases centered on the perceived value of a product, feature, or service.",
+    "parent_category": [
+      "Video"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_QA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Q&A Session",
+    "description": "Structured question-and-answer content in which an expert responds to audience or host questions",
+    "consolidated_from": [
+      "Question-and-answer video",
+      "Question-and-answer podcast"
+    ],
+    "consolidated_ids": [
+      "goLfRRB6",
+      "mC7244i7"
+    ],
+    "consolidation_reason": "The defining structure is the Q&A format itself, not whether it was captured as audio or video.",
+    "parent_category": [
+      "Video",
+      "Audio"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG",
+      "53DSgGhE"
+    ]
+  },
+  {
+    "_id": "H3taehoo",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.618Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Simulation video",
+    "description": "Video presenting or explaining a simulated process, scenario, or phenomenon",
+    "parent_category": [
+      "Video"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG"
+    ]
+  },
+  {
+    "_id": "Y6wsmUPU",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.628Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Vlog",
+    "description": "Personal or experience-led video log published online",
+    "parent_category": [
+      "Video"
+    ],
+    "parent_category_id": [
+      "H4AQkKXG"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_AUDIO_PROGRAM",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Audio Program",
+    "description": "Audio-native episodic or commentary-style content published as a program, magazine, or podcast episode",
+    "consolidated_from": [
+      "Audio magazine",
+      "Commentary",
+      "Solo podcast"
+    ],
+    "consolidated_ids": [
+      "iUE7C8gi",
+      "DnonhfTq",
+      "bHWVcpKs"
+    ],
+    "consolidation_reason": "These three labels describe editorial packaging or host configuration rather than sharply different knowledge-object types. For users they behave as one family of audio programs.",
+    "parent_category": [
+      "Audio"
+    ],
+    "parent_category_id": [
+      "53DSgGhE"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_DATA_VIZ",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Data Visualization",
+    "description": "Visual artifact whose primary purpose is to communicate data, patterns, or summarised information",
+    "consolidated_from": [
+      "Chart/graph",
+      "Infographic"
+    ],
+    "consolidated_ids": [
+      "WJTQJfgm",
+      "EJSR9nMq"
+    ],
+    "consolidation_reason": "Charts, graphs, and infographics are all data communication visuals. The difference is presentational style, not retrieval intent.",
+    "parent_category": [
+      "Image"
+    ],
+    "parent_category_id": [
+      "7oeWtUoi"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_FIGURE_IMAGE",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Figure/Image",
+    "description": "Standalone image or figure, whether static or motion-enabled, used to illustrate or explain content",
+    "consolidated_from": [
+      "Interactive figure/image",
+      "Static figure/image"
+    ],
+    "consolidated_ids": [
+      "hJVbY38P",
+      "VQsVtkqD"
+    ],
+    "consolidation_reason": "Interactivity is an implementation property that can be modeled separately. The underlying content type remains a figure or image.",
+    "parent_category": [
+      "Image"
+    ],
+    "parent_category_id": [
+      "7oeWtUoi"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_MAP",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Map",
+    "description": "Map-based visual representation of a whole area or part of an area",
+    "consolidated_from": [
+      "Interactive map",
+      "Static map"
+    ],
+    "consolidated_ids": [
+      "nPnRdis3",
+      "UmAcFsdQ"
+    ],
+    "consolidation_reason": "Static versus interactive is a delivery property, not a different map subtype.",
+    "parent_category": [
+      "Image"
+    ],
+    "parent_category_id": [
+      "7oeWtUoi"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_AUDIO_DATA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Audio Data",
+    "description": "Dataset composed primarily of audio or sound recordings",
+    "consolidated_from": [
+      "Auditory data"
+    ],
+    "consolidated_ids": [
+      "LRZBnqpw"
+    ],
+    "consolidation_reason": "Preferred label normalised from auditory to audio for consistency with common technical usage.",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ],
+    "renamed_from": "Auditory data"
+  },
+  {
+    "_id": "CbGR2Kjc",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.723Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Geospatial data",
+    "description": "Dataset containing location-tied records such as coordinates, addresses, or other geographic references",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_GRAPH_NETWORK_DATA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Graph/Network Data",
+    "description": "Dataset modelling entities and their relationships as graphs or networks",
+    "consolidated_from": [
+      "Graph-related data",
+      "Network-related data"
+    ],
+    "consolidated_ids": [
+      "JSbZcrJG",
+      "5BNb3sQD"
+    ],
+    "consolidation_reason": "The metadata guide itself notes the theoretical similarity between graph and network data. In practice these are usually retrieved and processed as one family.",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_IMAGE_DATA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Image Data",
+    "description": "Dataset composed primarily of images or other still visual records",
+    "consolidated_from": [
+      "Imagery data"
+    ],
+    "consolidated_ids": [
+      "Y9Bk4WMo"
+    ],
+    "consolidation_reason": "Preferred label normalised from imagery to image for consistency with other modality labels.",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ],
+    "renamed_from": "Imagery data"
+  },
+  {
+    "_id": "CONSOLIDATED_TEXT_DATA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Text Data",
+    "description": "Dataset composed primarily of textual or natural-language records",
+    "consolidated_from": [
+      "Textual data"
+    ],
+    "consolidated_ids": [
+      "gZLYqTm6"
+    ],
+    "consolidation_reason": "Preferred label normalised from textual to text for consistency with common data modality naming.",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ],
+    "renamed_from": "Textual data"
+  },
+  {
+    "_id": "9FtaTx7h",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.743Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Video data",
+    "description": "Dataset composed primarily of videos or video-derived records",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_AGRI_DATA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Agricultural Production Data",
+    "description": "Dataset describing crop production, farm inputs, or yield outcomes",
+    "consolidated_from": [
+      "Crop-related data",
+      "Input-related data",
+      "Yield-related data"
+    ],
+    "consolidated_ids": [
+      "5sSairXu",
+      "6JTL649U",
+      "ihTQgmWZ"
+    ],
+    "consolidation_reason": "These three labels describe tightly coupled parts of the same agricultural production chain. Keeping them separate at subtype level over-fragments closely related farm datasets.",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_ENV_TEMP_DATA",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Environmental & Temporal Data",
+    "description": "Dataset describing weather, climate, environmental conditions, or other time-indexed observations",
+    "consolidated_from": [
+      "Temporal data",
+      "Weather/climate data"
+    ],
+    "consolidated_ids": [
+      "JDrpTegB",
+      "HuyGbVvc"
+    ],
+    "consolidation_reason": "'Temporal data' is too generic as a standalone subtype because time is a property present in many datasets. Consolidating it with weather/climate creates a more practical environmental time-series bucket.",
+    "parent_category": [
+      "Dataset"
+    ],
+    "parent_category_id": [
+      "SdtDnWxr"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_ANALYTICAL_SW",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Analytical & Scientific Software",
+    "description": "Software used for AI, scientific computation, modelling, or data analysis",
+    "consolidated_from": [
+      "AI software",
+      "Data analysis software",
+      "Scientific software"
+    ],
+    "consolidated_ids": [
+      "XWYRiPg3",
+      "gNvGzaQP",
+      "3RAtrWc5"
+    ],
+    "consolidation_reason": "These tools are all analytical software built to generate insights, models, or scientific results. Their separation is mainly based on implementation emphasis.",
+    "parent_category": [
+      "Software Application"
+    ],
+    "parent_category_id": [
+      "6NhmfRWh"
+    ]
+  },
+  {
+    "_id": "igysQYie",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.691Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Business software",
+    "description": "Software developed to support business or organisational processes",
+    "parent_category": [
+      "Software Application"
+    ],
+    "parent_category_id": [
+      "6NhmfRWh"
+    ]
+  },
+  {
+    "_id": "XQRHtVsU",
+    "created_ts": {
+      "$date": "2025-05-18T19:26:20.695Z"
+    },
+    "created_by": "System",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 2,
+    "status": "Published",
+    "name": "Data repository/database",
+    "description": "Software system used to store, manage, and serve structured or unstructured data",
+    "parent_category": [
+      "Software Application"
+    ],
+    "parent_category_id": [
+      "6NhmfRWh"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_FARM_DSS",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Farm Management & Decision Support Software",
+    "description": "Operational software that supports farm management, planning, and decision-making",
+    "consolidated_from": [
+      "Decision support tool",
+      "Farm Management Information System (FMIS)"
+    ],
+    "consolidated_ids": [
+      "5KMCRvjR",
+      "VzcqHjiL"
+    ],
+    "consolidation_reason": "FMIS is a domain-specific form of management and decision-support software. Users evaluating farm software will usually expect these tools together.",
+    "parent_category": [
+      "Software Application"
+    ],
+    "parent_category_id": [
+      "6NhmfRWh"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_EDU_SW",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Educational/Training Software",
+    "description": "Software created primarily for learning, training, or serious-game style educational interaction",
+    "consolidated_from": [
+      "Educational/training software",
+      "Game"
+    ],
+    "consolidated_ids": [
+      "WTqdznva",
+      "gJrqAnSV"
+    ],
+    "consolidation_reason": "The guide explicitly defines game here as a serious educational/training game, so it is better treated as a subtype of educational/training software than as a separate top-level software concept.",
+    "parent_category": [
+      "Software Application"
+    ],
+    "parent_category_id": [
+      "6NhmfRWh"
+    ]
+  },
+  {
+    "_id": "CONSOLIDATED_SIM_SW",
+    "created_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "created_by": "Consolidation",
+    "updated_ts": {
+      "$date": "2026-03-19T00:00:00.000Z"
+    },
+    "updated_by": "Consolidation",
+    "version": 1,
+    "status": "Published",
+    "name": "Simulation Software",
+    "description": "Software that simulates the operation of a real process or system over time",
+    "consolidated_from": [
+      "Simulation"
+    ],
+    "consolidated_ids": [
+      "2eEuVeAC"
+    ],
+    "consolidation_reason": "Label normalised to make the software subtype explicit.",
+    "parent_category": [
+      "Software Application"
+    ],
+    "parent_category_id": [
+      "6NhmfRWh"
+    ],
+    "renamed_from": "Simulation"
+  }
+]

@@ -47,9 +47,7 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Healthcheck: keep it simple and secret-free (use your /health as-is)
-# If /health is protected, strongly consider making it unauthenticated on localhost,
-# or do healthchecks at Traefik instead.
+# Healthcheck: /health is intentionally unauthenticated for local/container probes.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" || exit 1
 
