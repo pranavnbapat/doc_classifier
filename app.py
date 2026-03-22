@@ -29,6 +29,7 @@ from docint.extract.ocr import ocr_pdf
 from docint.features.sections import count_sections
 from docint.features.citations import detect_citations
 from docint.features.keywords import count_keywords
+from docint.domain.agriculture_pipeline import assess_agriculture_relevance_staged
 from docint.rubrics.imrad import score_imrad
 from docint.rubrics.citations import score_citations
 from docint.rubrics.deliverable import score_deliverable
@@ -182,11 +183,27 @@ class FusionInfo(BaseModel):
     rationale: str
 
 
+class AgricultureRelevance(BaseModel):
+    """Agriculture domain relevance assessment."""
+    is_agriculture_related: bool
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    score: float = Field(..., ge=0.0, le=1.0)
+    method: str
+    lexicon_version: str
+    matched_terms: List[str]
+    matched_buckets: List[str]
+    matched_concepts: List[str]
+    bucket_scores: Dict[str, float]
+    rationale: str
+    stages_used: List[str]
+    stage_results: List[Dict[str, Any]]
+
+
 class ClassificationResponse(BaseModel):
     """Complete classification response."""
     # Primary results
-    best_match: SubcategoryCandidate
-    all_candidates: List[SubcategoryCandidate]
+    best_match: Optional[SubcategoryCandidate] = None
+    all_candidates: List[SubcategoryCandidate] = []
     
     # Fusion info (if multiple sources used)
     fusion: Optional[FusionInfo] = None
@@ -195,6 +212,9 @@ class ClassificationResponse(BaseModel):
     heuristics: Optional[SubcategoryCandidate] = None
     vision_llm: Optional[Dict[str, Any]] = None
     text_llm: Optional[Dict[str, Any]] = None
+    agriculture_relevance: AgricultureRelevance
+    classification_skipped: bool = False
+    skip_reason: Optional[str] = None
     
     # Metadata
     total_candidates: int
@@ -435,6 +455,7 @@ def add_contrastive_rationales(candidates: List[SubcategoryCandidate], top_k: in
 def classify_document(
     pdf_path: str,
     filename: str,
+    require_agriculture: bool = True,
     use_vision: bool = False,
     use_text_llm: bool = False,
     heuristics_alpha: float = 0.4,
@@ -449,6 +470,7 @@ def classify_document(
     Args:
         pdf_path: Path to PDF file
         filename: Original filename
+        require_agriculture: Whether to stop early for confident non-agriculture PDFs
         use_vision: Whether to use Vision LLM
         use_text_llm: Whether to use Text LLM
         heuristics_alpha: Weight for heuristics (0.0-1.0), LLM gets (1-alpha)
@@ -463,11 +485,15 @@ def classify_document(
     import time
     
     start_time = time.time()
+    stage_timings_ms: Dict[str, float] = {}
     
     # 1) Extract text from PDF
+    stage_start = time.time()
     doc = extract_pdf_text(pdf_path, max_pages=None)
+    stage_timings_ms["text_extraction_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     # 2) OCR fallback if needed
+    stage_start = time.time()
     quality = text_quality_ok(doc.text)
     if not quality.ok:
         ocr_doc = ocr_pdf(pdf_path, max_pages=ocr_max_pages, lang=ocr_lang)
@@ -478,8 +504,85 @@ def classify_document(
             lines=ocr_doc.lines,
             source="ocr",
         )
+    stage_timings_ms["ocr_fallback_ms"] = round((time.time() - stage_start) * 1000, 2)
     
-    # 3) Extract features and compute rubric scores
+    # 3) Agriculture gate before the heavier classification pipeline
+    stage_start = time.time()
+    agri_relevance = assess_agriculture_relevance_staged(
+        doc.text,
+        lines=doc.lines,
+        allow_llm_fallback=use_text_llm and LLM_CONFIGURED,
+        llm_config={
+            "base_url": LLM_BASE_URL,
+            "api_key": LLM_API_KEY,
+            "model": LLM_MODEL,
+        } if use_text_llm and LLM_CONFIGURED else None,
+    )
+    stage_timings_ms["agriculture_pipeline_ms"] = round((time.time() - stage_start) * 1000, 2)
+    agriculture_response = AgricultureRelevance(
+        is_agriculture_related=agri_relevance.is_agriculture_related,
+        confidence=round(agri_relevance.confidence, 4),
+        score=round(agri_relevance.score, 4),
+        method=agri_relevance.method,
+        lexicon_version=agri_relevance.lexicon_version,
+        matched_terms=agri_relevance.matched_terms,
+        matched_buckets=agri_relevance.matched_buckets,
+        matched_concepts=agri_relevance.matched_concepts,
+        bucket_scores={k: round(v, 4) for k, v in agri_relevance.bucket_scores.items()},
+        rationale=agri_relevance.rationale,
+        stages_used=agri_relevance.stages_used,
+        stage_results=[
+            {
+                "stage": item.stage,
+                "available": item.available,
+                "used": item.used,
+                "is_agriculture_related": item.is_agriculture_related,
+                "confidence": item.confidence,
+                "rationale": item.rationale,
+                "details": item.details,
+            }
+            for item in agri_relevance.stage_results
+        ],
+    )
+
+    if require_agriculture and not agri_relevance.is_agriculture_related:
+        processing_time_ms = (time.time() - start_time) * 1000
+        return ClassificationResponse(
+            best_match=None,
+            all_candidates=[],
+            fusion=None,
+            heuristics=None,
+            vision_llm=None,
+            text_llm=None,
+            agriculture_relevance=agriculture_response,
+            classification_skipped=True,
+            skip_reason="Document classified as non-agriculture; subcategory classification skipped",
+            total_candidates=0,
+            confidence_threshold_met=False,
+            document_info={
+                "filename": filename,
+                "pages": doc.pages,
+                "source": doc.source,
+                "text_length": len(doc.text),
+                "text_quality": {
+                    "chars": quality.metrics.get("chars"),
+                    "letters": quality.metrics.get("letters"),
+                    "letter_ratio": quality.metrics.get("letter_ratio"),
+                    "ok": quality.ok,
+                } if hasattr(quality, 'metrics') else None,
+            },
+            processing_info={
+                "processing_time_ms": round(processing_time_ms, 2),
+                "ocr_used": doc.source == "ocr",
+                "sources_used": [],
+                "fusion_enabled": False,
+                "require_agriculture": require_agriculture,
+                "stage_timings_ms": stage_timings_ms,
+            },
+        )
+
+    # 4) Extract features and compute rubric scores
+    stage_start = time.time()
     sections = count_sections(doc.lines)
     cites = detect_citations(doc.text, has_references_heading=sections.present.get("references", False))
     kw = count_keywords(doc.text)
@@ -489,7 +592,6 @@ def classify_document(
     r_deliv = score_deliverable(kw, sections=sections)
     r_ped = score_pedagogy(kw)
     r_proc = score_procedure(kw)
-    
     rubric_scores = {
         "imrad": r_imrad.score,
         "citations": r_cites.score,
@@ -497,8 +599,10 @@ def classify_document(
         "pedagogy": r_ped.score,
         "procedure": r_proc.score,
     }
+    stage_timings_ms["feature_and_rubric_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     # 4) Evidence-based classification
+    stage_start = time.time()
     best_match, all_scores, _ = score_subcategories(
         text=doc.text,
         lines=doc.lines,
@@ -528,6 +632,7 @@ def classify_document(
         evidence_score=best_candidate.evidence_score if best_candidate else 0.0,
         rationale=best_candidate.rationale if best_candidate else "",
     )
+    stage_timings_ms["heuristics_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     # 5) Optional LLM analysis
     vision_source = None
@@ -536,6 +641,7 @@ def classify_document(
     
     # Vision LLM
     if use_vision and VISION_LLM_BASE_URL:
+        stage_start = time.time()
         try:
             from docint.llm.subcategory_classify import llm_classify_subcategories_vision
             
@@ -567,9 +673,11 @@ def classify_document(
             }
         except Exception as e:
             llm_results["vision"] = {"error": str(e), "model": VISION_LLM_MODEL}
+        stage_timings_ms["vision_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     # Text LLM
     if use_text_llm and LLM_CONFIGURED:
+        stage_start = time.time()
         try:
             from docint.llm.subcategory_classify import llm_classify_subcategories_text
             
@@ -599,6 +707,7 @@ def classify_document(
             }
         except Exception as e:
             llm_results["text"] = {"error": str(e), "model": LLM_MODEL}
+        stage_timings_ms["text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     # 6) Intelligent fusion if multiple sources
     fusion_info = None
@@ -611,6 +720,7 @@ def classify_document(
         sources_for_fusion.append(text_source)
     
     if len(sources_for_fusion) > 1:
+        stage_start = time.time()
         strategy_map = {
             "weighted": FusionStrategy.WEIGHTED,
             "adaptive": FusionStrategy.CONFIDENCE_ADAPTIVE,
@@ -661,6 +771,7 @@ def classify_document(
         add_contrastive_rationales(final_candidates)
 
         final_best = final_candidates[0]
+        stage_timings_ms["fusion_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     threshold_met = final_best.confidence >= 0.35 if final_best else False
     
@@ -673,6 +784,9 @@ def classify_document(
         heuristics=heuristics_best,
         vision_llm=llm_results.get("vision"),
         text_llm=llm_results.get("text"),
+        agriculture_relevance=agriculture_response,
+        classification_skipped=False,
+        skip_reason=None,
         total_candidates=len(final_candidates),
         confidence_threshold_met=threshold_met,
         document_info={
@@ -692,6 +806,8 @@ def classify_document(
             "ocr_used": doc.source == "ocr",
             "sources_used": [s.source_name for s in sources_for_fusion],
             "fusion_enabled": fusion_info is not None,
+            "require_agriculture": require_agriculture,
+            "stage_timings_ms": stage_timings_ms,
         },
     )
 
@@ -811,6 +927,7 @@ async def health(request: Request):
 async def classify_endpoint(
     request: Request,
     file: UploadFile = File(..., description="PDF file to classify"),
+    require_agriculture: bool = Query(True, description="Skip subcategory classification for confident non-agriculture PDFs"),
     use_vision: bool = Query(False, description="Use Vision LLM (InternVL)"),
     use_text_llm: bool = Query(False, description="Use Text LLM (Qwen)"),
     heuristics_alpha: float = Query(
@@ -846,6 +963,7 @@ async def classify_endpoint(
         result = classify_document(
             pdf_path=tmp_path,
             filename=filename,
+            require_agriculture=require_agriculture,
             use_vision=use_vision,
             use_text_llm=use_text_llm,
             heuristics_alpha=heuristics_alpha,
@@ -892,4 +1010,6 @@ async def list_subcategories(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

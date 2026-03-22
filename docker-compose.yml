@@ -13,7 +13,7 @@ services:
     
     # Port mapping (host:container)
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     
     # Resource limits
     deploy:

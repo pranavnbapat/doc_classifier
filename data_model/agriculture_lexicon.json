@@ -1,0 +1,273 @@
+{
+  "version": "agrovoc_curated_v0",
+  "description": "Curated multilingual agriculture lexicon scaffold inspired by AGROVOC-style concept organization. This is a bootstrap resource for fast CPU-first agriculture relevance detection.",
+  "concepts": [
+    {
+      "concept_id": "AGROVOC:c_203",
+      "bucket": "farming_systems",
+      "preferred_label": {"language": "en", "label": "agriculture"},
+      "alt_labels": [
+        {"language": "en", "label": "agricultural"},
+        {"language": "nl", "label": "landbouw"},
+        {"language": "fr", "label": "agriculture"},
+        {"language": "de", "label": "landwirtschaft"},
+        {"language": "es", "label": "agricultura"},
+        {"language": "it", "label": "agricoltura"},
+        {"language": "el", "label": "γεωργία"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_27956",
+      "bucket": "farming_systems",
+      "preferred_label": {"language": "en", "label": "farm"},
+      "alt_labels": [
+        {"language": "en", "label": "farmer"},
+        {"language": "en", "label": "farmers"},
+        {"language": "fr", "label": "agriculteur"},
+        {"language": "de", "label": "landwirt"},
+        {"language": "es", "label": "agricultor"},
+        {"language": "it", "label": "agricoltore"},
+        {"language": "el", "label": "αγρότης"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_331583",
+      "bucket": "farming_systems",
+      "preferred_label": {"language": "en", "label": "food security"},
+      "alt_labels": [
+        {"language": "en", "label": "food systems"},
+        {"language": "fr", "label": "sécurité alimentaire"},
+        {"language": "de", "label": "ernährungssicherheit"},
+        {"language": "es", "label": "seguridad alimentaria"},
+        {"language": "it", "label": "sicurezza alimentare"},
+        {"language": "el", "label": "επισιτιστική ασφάλεια"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "AGROVOC:c_1972",
+      "bucket": "crops_plants",
+      "preferred_label": {"language": "en", "label": "crop"},
+      "alt_labels": [
+        {"language": "en", "label": "crops"},
+        {"language": "en", "label": "cropping"},
+        {"language": "nl", "label": "gewas"},
+        {"language": "nl", "label": "gewassen"},
+        {"language": "fr", "label": "culture"},
+        {"language": "de", "label": "anbau"},
+        {"language": "es", "label": "cultivo"},
+        {"language": "it", "label": "coltura"},
+        {"language": "el", "label": "καλλιέργεια"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_3295",
+      "bucket": "crops_plants",
+      "preferred_label": {"language": "en", "label": "grassland"},
+      "alt_labels": [
+        {"language": "en", "label": "pasture"},
+        {"language": "nl", "label": "grasland"},
+        {"language": "fr", "label": "prairie"},
+        {"language": "de", "label": "grünland"},
+        {"language": "es", "label": "pastizal"},
+        {"language": "it", "label": "prato"},
+        {"language": "el", "label": "λιβάδι"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "AGROVOC:c_24879",
+      "bucket": "crops_plants",
+      "preferred_label": {"language": "en", "label": "horticulture"},
+      "alt_labels": [
+        {"language": "nl", "label": "tuinbouw"},
+        {"language": "fr", "label": "horticulture"},
+        {"language": "de", "label": "gartenbau"},
+        {"language": "es", "label": "horticultura"},
+        {"language": "it", "label": "orticoltura"},
+        {"language": "el", "label": "κηπουρική"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "AGROVOC:c_4380",
+      "bucket": "livestock_manure",
+      "preferred_label": {"language": "en", "label": "livestock"},
+      "alt_labels": [
+        {"language": "en", "label": "dairy"},
+        {"language": "fr", "label": "élevage"},
+        {"language": "de", "label": "vieh"},
+        {"language": "es", "label": "ganadería"},
+        {"language": "it", "label": "allevamento"},
+        {"language": "el", "label": "κτηνοτροφία"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_4424",
+      "bucket": "livestock_manure",
+      "preferred_label": {"language": "en", "label": "manure"},
+      "alt_labels": [
+        {"language": "en", "label": "slurry"},
+        {"language": "nl", "label": "mest"},
+        {"language": "nl", "label": "drijfmest"},
+        {"language": "fr", "label": "fumier"},
+        {"language": "fr", "label": "lisier"},
+        {"language": "de", "label": "gülle"},
+        {"language": "es", "label": "estiércol"},
+        {"language": "it", "label": "letame"},
+        {"language": "el", "label": "κοπριά"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "LOCAL:digestate",
+      "bucket": "livestock_manure",
+      "preferred_label": {"language": "en", "label": "digestate"},
+      "alt_labels": [
+        {"language": "fr", "label": "digestat"},
+        {"language": "de", "label": "gärrest"},
+        {"language": "es", "label": "digestato"},
+        {"language": "it", "label": "digestato"},
+        {"language": "el", "label": "χωνεμένο υπόλειμμα"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_2866",
+      "bucket": "soil_water_nutrients",
+      "preferred_label": {"language": "en", "label": "fertilizer"},
+      "alt_labels": [
+        {"language": "en", "label": "fertiliser"},
+        {"language": "en", "label": "fertilizers"},
+        {"language": "en", "label": "fertilisers"},
+        {"language": "nl", "label": "meststof"},
+        {"language": "fr", "label": "engrais"},
+        {"language": "de", "label": "dünger"},
+        {"language": "es", "label": "fertilizante"},
+        {"language": "it", "label": "fertilizzante"},
+        {"language": "el", "label": "λίπασμα"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_5274",
+      "bucket": "soil_water_nutrients",
+      "preferred_label": {"language": "en", "label": "nutrient"},
+      "alt_labels": [
+        {"language": "en", "label": "nutrients"},
+        {"language": "fr", "label": "nutriment"},
+        {"language": "de", "label": "nährstoff"},
+        {"language": "es", "label": "nutriente"},
+        {"language": "it", "label": "nutriente"},
+        {"language": "el", "label": "θρεπτικό στοιχείο"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "AGROVOC:c_7401",
+      "bucket": "soil_water_nutrients",
+      "preferred_label": {"language": "en", "label": "soil"},
+      "alt_labels": [
+        {"language": "nl", "label": "bodem"},
+        {"language": "fr", "label": "sol"},
+        {"language": "de", "label": "boden"},
+        {"language": "es", "label": "suelo"},
+        {"language": "it", "label": "suolo"},
+        {"language": "el", "label": "έδαφος"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "AGROVOC:c_13370",
+      "bucket": "soil_water_nutrients",
+      "preferred_label": {"language": "en", "label": "irrigation"},
+      "alt_labels": [
+        {"language": "nl", "label": "irrigatie"},
+        {"language": "fr", "label": "irrigation"},
+        {"language": "de", "label": "bewässerung"},
+        {"language": "es", "label": "riego"},
+        {"language": "it", "label": "irrigazione"},
+        {"language": "el", "label": "άρδευση"}
+      ],
+      "strong_anchor": true
+    },
+    {
+      "concept_id": "LOCAL:nitrogen",
+      "bucket": "soil_water_nutrients",
+      "preferred_label": {"language": "en", "label": "nitrogen"},
+      "alt_labels": [
+        {"language": "en", "label": "ammonium"},
+        {"language": "en", "label": "nitrate"},
+        {"language": "fr", "label": "azote"},
+        {"language": "de", "label": "stickstoff"},
+        {"language": "es", "label": "nitrógeno"},
+        {"language": "it", "label": "azoto"},
+        {"language": "el", "label": "άζωτο"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "LOCAL:nutrient_recovery",
+      "bucket": "agri_bioeconomy",
+      "preferred_label": {"language": "en", "label": "nutrient recovery"},
+      "alt_labels": [
+        {"language": "en", "label": "processed manure"},
+        {"language": "fr", "label": "récupération des nutriments"},
+        {"language": "de", "label": "nährstoffrückgewinnung"},
+        {"language": "es", "label": "recuperación de nutrientes"},
+        {"language": "it", "label": "recupero dei nutrienti"},
+        {"language": "el", "label": "ανάκτηση θρεπτικών στοιχείων"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "LOCAL:biofertilizer",
+      "bucket": "agri_bioeconomy",
+      "preferred_label": {"language": "en", "label": "biofertilizer"},
+      "alt_labels": [
+        {"language": "en", "label": "biofertilizer"},
+        {"language": "en", "label": "biofertilizers"},
+        {"language": "en", "label": "bio-based fertiliser"},
+        {"language": "en", "label": "bio-based fertilisers"},
+        {"language": "en", "label": "bio-based fertilizer"},
+        {"language": "en", "label": "bio-based fertilizers"},
+        {"language": "fr", "label": "biofertilisant"},
+        {"language": "de", "label": "biodünger"},
+        {"language": "es", "label": "biofertilizante"},
+        {"language": "it", "label": "biofertilizzante"},
+        {"language": "el", "label": "βιολίπασμα"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "LOCAL:biogas_plant",
+      "bucket": "agri_bioeconomy",
+      "preferred_label": {"language": "en", "label": "biogas plant"},
+      "alt_labels": [
+        {"language": "fr", "label": "usine de biogaz"},
+        {"language": "de", "label": "biogasanlage"},
+        {"language": "es", "label": "planta de biogás"},
+        {"language": "it", "label": "impianto di biogas"},
+        {"language": "el", "label": "μονάδα βιοαερίου"}
+      ],
+      "strong_anchor": false
+    },
+    {
+      "concept_id": "LOCAL:biostimulant",
+      "bucket": "agri_bioeconomy",
+      "preferred_label": {"language": "en", "label": "biostimulant"},
+      "alt_labels": [
+        {"language": "fr", "label": "biostimulant"},
+        {"language": "de", "label": "biostimulans"},
+        {"language": "es", "label": "bioestimulante"},
+        {"language": "it", "label": "biostimolante"},
+        {"language": "el", "label": "βιοδιεγέρτης"}
+      ],
+      "strong_anchor": false
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 FastAPI service for explainable PDF document subcategory classification. The current runtime scope is PDF-based document classification into 11 consolidated document subcategories, with deterministic heuristics always available and optional text and vision LLM augmentation.
 
-The broader category and KO-ingestion policy work is documented under [data_model/category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, but the `/classify` endpoint in this repository currently classifies PDFs as document subcategories only.
+The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, but the `/classify` endpoint in this repository currently classifies PDFs as document subcategories only.
 
 ## What The API Does
 
@@ -29,8 +29,8 @@ The broader category and KO-ingestion policy work is documented under [data_mode
 
 The consolidation rationale is documented in:
 
-- [data_model/document_subcategories_consolidation.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/document_subcategories_consolidation.md)
-- [data_model/subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model/subcategories_consolidation_analysis.md)
+- [document_subcategories_consolidation.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/document_subcategories_consolidation.md)
+- [subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/subcategories_consolidation_analysis.md)
 
 ## Explainability Model
 
@@ -42,7 +42,7 @@ The heuristic layer uses 27 measurable signals, including:
 - policy and communication signals such as `news_timeliness`, `press_release_format`, `regulatory_update_markers`, `compliance_language`, `governance_references`
 - layout signals such as `slide_indicators`, `visual_heavy`, `short_form`
 
-The source of truth for subcategory criteria is [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py). Each subcategory definition carries:
+The source of truth for subcategory criteria is [subcategories.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/rubrics/subcategories.py). Each subcategory definition carries:
 
 - detectable features
 - positive signal hints
@@ -56,6 +56,35 @@ Those same criteria are now used in three places:
 - contrastive API explanations
 - LLM prompting guidance
 
+## Agriculture Relevance
+
+The API now also returns an `agriculture_relevance` block for each classified PDF.
+
+The current design is staged:
+
+- Stage 1: AGROVOC-style multilingual lexicon matcher backed by [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon.json)
+- Stage 2: small local multilingual embedding model for ambiguous cases
+- Stage 3: optional text LLM fallback only when the earlier stages remain uncertain
+
+Default behavior:
+
+- Stage 1 is always active
+- Stage 2 is enabled by default and uses `intfloat/multilingual-e5-small` on CPU once `sentence-transformers` is installed
+- Stage 3 is only active for ambiguous cases and only when text LLM use is enabled
+
+Relevant settings:
+
+- `AGRI_ENABLE_EMBEDDING=true`
+- `AGRI_EMBEDDING_MODEL=intfloat/multilingual-e5-small`
+- `AGRI_EMBEDDING_TEXT_LIMIT=3500`
+- `AGRI_EMBEDDING_OVERRIDE_THRESHOLD=0.74`
+- `AGRI_EMBEDDING_BLEND_WEIGHT=0.45`
+- `AGRI_ENABLE_LLM_FALLBACK=true`
+
+Operational note:
+
+- Stage 2 stays fail-safe. If the embedding dependency or local model is unavailable, the API falls back to the Stage 1 lexicon result and records that in `agriculture_relevance.stage_results`.
+
 ## API Endpoints
 
 ### `POST /classify`
@@ -68,6 +97,7 @@ Important runtime constraint:
 
 Query parameters:
 
+- `require_agriculture`: if `true`, non-agriculture PDFs return early and skip subcategory classification
 - `use_vision`: enable InternVL-style vision classification
 - `use_text_llm`: enable text LLM classification
 - `heuristics_alpha`: heuristic weight used by weighted fusion
@@ -79,7 +109,7 @@ Query parameters:
 Example:
 
 ```bash
-curl -X POST "http://localhost:8000/classify?use_text_llm=true&fusion_strategy=adaptive" \
+curl -X POST "http://localhost:8011/classify?require_agriculture=true&use_text_llm=false&use_vision=false" \
   -F "file=@document.pdf"
 ```
 
@@ -87,6 +117,10 @@ Representative response fields:
 
 - `best_match`: top candidate after heuristics-only scoring or fusion
 - `all_candidates`: full ranked list
+- `classification_skipped`: whether classification stopped after the agriculture gate
+- `skip_reason`: explanation when classification is intentionally skipped
+- `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results
+- `processing_info.stage_timings_ms`: latency breakdown by extraction, OCR, agriculture, heuristics, LLM, and fusion stages
 - `feature_details`: feature-level evidence and excerpts
 - `rationale`: direct explanation for the candidate
 - `contrastive_rationale`: why the winner beat nearby alternatives
@@ -162,7 +196,7 @@ Minimal `.env` for local heuristics-only use:
 
 ```bash
 HOST=0.0.0.0
-PORT=8000
+PORT=8011
 WORKERS=1
 
 DOCINT_AUTH_USERS=
@@ -199,11 +233,11 @@ python start_server.py
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The API will be available at `http://localhost:8000`.
+The API will be available at `http://localhost:8011` when `PORT=8011` is set in `.env`.
 
 ### Docker Compose
 
-The repository includes a local Compose file at [docker-compose.yml](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docker-compose.yml).
+The repository includes a local Compose file at [docker-compose.yml](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docker-compose.yml).
 
 Basic flow:
 
@@ -212,7 +246,7 @@ cp .env.sample .env
 docker compose up --build
 ```
 
-The service will be exposed on `http://localhost:8000`.
+The service will be exposed on `http://localhost:8011` when `PORT=8011` is set in `.env`.
 
 For local testing, leaving `DOCINT_AUTH_USERS` and `DOCINT_AUTH_PASSWORD` empty is the simplest option. If Basic Auth is enabled, `/health` still remains public for container and load-balancer health checks.
 
@@ -240,12 +274,12 @@ docker run --rm -p 8000:8000 --env-file .env ko-classifier:local
 
 ## Project Structure
 
-- [app.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/app.py): FastAPI app and response shaping
-- [docint/rubrics/subcategories.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategories.py): active subcategory source of truth
-- [docint/rubrics/subcategory_scorer.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/rubrics/subcategory_scorer.py): heuristic scoring engine
-- [docint/llm/subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/llm/subcategory_classify.py): text and vision LLM classification
-- [docint/fusion/intelligent_fusion.py](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/docint/fusion/intelligent_fusion.py): fusion strategies
-- [data_model/](/home/pranav/PyCharm/EU-FarmBook/ko_classifier/data_model): taxonomy, consolidation, and category policy documents
+- [app.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/app.py): FastAPI app and response shaping
+- [subcategories.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/rubrics/subcategories.py): active subcategory source of truth
+- [subcategory_scorer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/rubrics/subcategory_scorer.py): heuristic scoring engine
+- [subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/llm/subcategory_classify.py): text and vision LLM classification
+- [intelligent_fusion.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/fusion/intelligent_fusion.py): fusion strategies
+- [data_model](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model): taxonomy, consolidation, and category policy documents
 
 ## Verification
 
