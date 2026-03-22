@@ -98,18 +98,22 @@ Important runtime constraint:
 Query parameters:
 
 - `require_agriculture`: if `true`, non-agriculture PDFs return early and skip subcategory classification
-- `use_vision`: enable InternVL-style vision classification
-- `use_text_llm`: enable text LLM classification
+- `auto_route_models`: if `true`, the API decides when text and vision models are actually used
+- `use_vision`: allow InternVL-style vision classification when routing decides it is needed; default `true`
+- `use_text_llm`: allow text LLM classification for agriculture-related documents; default `true`
 - `heuristics_alpha`: heuristic weight used by weighted fusion
+- `classification_confidence_threshold`: confidence threshold used to treat a subcategory result as strong enough
+- `vision_trigger_threshold`: confidence threshold below which vision may be triggered
+- `candidate_gap_threshold`: probability gap threshold below which close candidates may trigger vision
 - `fusion_strategy`: `weighted`, `adaptive`, `agreement`, or `cascade`
-- `vision_max_pages`: maximum number of pages passed to the vision model
+- `vision_max_pages`: maximum sampled pages passed to the vision model; runtime uses deterministic representative-page sampling rather than scanning every page
 - `ocr_lang`: Tesseract OCR language bundle
 - `ocr_max_pages`: maximum pages sent through OCR fallback
 
 Example:
 
 ```bash
-curl -X POST "http://localhost:8011/classify?require_agriculture=true&use_text_llm=false&use_vision=false" \
+curl -X POST "http://localhost:8011/classify?require_agriculture=true&auto_route_models=true&use_text_llm=true&use_vision=true&fusion_strategy=adaptive" \
   -F "file=@document.pdf"
 ```
 
@@ -120,6 +124,7 @@ Representative response fields:
 - `classification_skipped`: whether classification stopped after the agriculture gate
 - `skip_reason`: explanation when classification is intentionally skipped
 - `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results
+- `processing_info.routing`: whether text and vision were requested, used, and why
 - `processing_info.stage_timings_ms`: latency breakdown by extraction, OCR, agriculture, heuristics, LLM, and fusion stages
 - `feature_details`: feature-level evidence and excerpts
 - `rationale`: direct explanation for the candidate
@@ -269,7 +274,7 @@ docker run --rm -p 8000:8000 --env-file .env ko-classifier:local
 - Heuristics are deterministic and comparatively fast.
 - Most latency comes from remote LLM calls, not from local feature extraction.
 - `cascade` fusion is the most practical speed-oriented option when heuristics are often decisive.
-- The vision model uses a sliding window for longer PDFs.
+- The vision model now uses deterministic representative-page sampling rather than overlapping page windows.
 - Text and vision prompts are aligned with the same criteria vocabulary used by heuristics.
 
 ## Project Structure

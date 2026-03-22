@@ -319,119 +319,76 @@ def llm_classify_subcategories_vision_batch(
     )
 
 
-def llm_classify_subcategories_vision_sliding_window(
+def _sample_vision_pages(total_pages: int, max_total_pages: int) -> List[int]:
+    """Deterministically sample representative pages from the document."""
+    pages_to_process = min(total_pages, max_total_pages)
+    if pages_to_process <= 3:
+        return list(range(1, pages_to_process + 1))
+
+    if pages_to_process <= 6:
+        return sorted(set([1, 2, pages_to_process // 2 or 1, pages_to_process - 1, pages_to_process]))
+
+    sample_size = min(8, pages_to_process)
+    if sample_size <= 1:
+        return [1]
+
+    positions = [0.0, 0.12, 0.28, 0.5, 0.72, 0.88, 1.0]
+    if sample_size < len(positions):
+        positions = positions[:sample_size]
+        positions[-1] = 1.0
+
+    sampled_pages = []
+    for pos in positions:
+        idx = round((pages_to_process - 1) * pos)
+        sampled_pages.append(idx + 1)
+
+    return sorted(set(max(1, min(pages_to_process, p)) for p in sampled_pages))
+
+
+def llm_classify_subcategories_vision_sampled(
     pdf_path: str,
     *,
     base_url: str,
     api_key: str,
     model: str,
-    window_size: int = 4,
-    overlap: int = 2,
-    max_total_pages: int = 20,
+    max_total_pages: int = 8,
     temperature: float = 0.2,
 ) -> SubcategoryLlmResult:
     """
-    Classify PDF using vision model with sliding window (map-reduce style).
+    Classify PDF using vision model on deterministic sampled pages.
     
     Args:
         pdf_path: Path to PDF file
         base_url: VLM endpoint
         api_key: API key
         model: VLM model name
-        window_size: Pages per batch (default 4, max 8 for InternVL)
-        overlap: Overlapping pages between batches (default 2)
-        max_total_pages: Maximum total pages to process
+        max_total_pages: Maximum sampled pages to process
         temperature: Sampling temperature
     
     Returns:
-        Combined SubcategoryLlmResult from all windows
+        SubcategoryLlmResult from sampled pages
     """
     from PyPDF2 import PdfReader
     
-    # Get total pages
     reader = PdfReader(pdf_path)
     total_pages = len(reader.pages)
-    pages_to_process = min(total_pages, max_total_pages)
-    
-    if pages_to_process <= window_size:
-        # Small document - process all at once
-        page_numbers = list(range(1, pages_to_process + 1))
-        return llm_classify_subcategories_vision_batch(
-            pdf_path, page_numbers,
-            base_url=base_url, api_key=api_key, model=model, temperature=temperature
-        )
-    
-    # Create sliding windows
-    windows = []
-    start = 1
-    while start <= pages_to_process:
-        end = min(start + window_size - 1, pages_to_process)
-        windows.append(list(range(start, end + 1)))
-        
-        # Move start with overlap
-        start = start + window_size - overlap
-        if end == pages_to_process:
-            break
-    
-    print(f"Processing {len(windows)} windows: {windows}")
-    
-    # Process each window
-    results = []
-    for window_pages in windows:
-        try:
-            result = llm_classify_subcategories_vision_batch(
-                pdf_path, window_pages,
-                base_url=base_url, api_key=api_key, model=model, temperature=temperature
-            )
-            results.append(result)
-        except Exception as e:
-            print(f"Error processing window {window_pages}: {e}")
-            continue
-    
-    if not results:
-        raise ValueError("All vision windows failed")
-    
-    # Combine results (average probabilities weighted by confidence)
-    combined_probs = {k: 0.0 for k in SUBCAT_TYPES}
-    total_weight = 0.0
-    
-    for r in results:
-        weight = r.confidence  # Weight by confidence
-        for k, v in r.probs.items():
-            combined_probs[k] += v * weight
-        total_weight += weight
-    
-    if total_weight > 0:
-        combined_probs = {k: v / total_weight for k, v in combined_probs.items()}
-    
-    combined_probs = normalize_subcategory_probs(combined_probs)
-    
-    # Best match
-    best_key = max(combined_probs.items(), key=lambda x: x[1])[0]
-    subcat_def = SUBCATEGORIES[best_key]
-    
-    # Combine rationales
-    combined_rationale = " | ".join([
-        f"[Pages {r.raw_json.get('pages_analyzed', '?')}] {r.rationale[:100]}"
-        for r in results
-    ])
-    
-    return SubcategoryLlmResult(
-        subcategory_key=best_key,
-        subcategory_name=subcat_def.name,
-        parent_type=subcat_def.parent_type.value,
-        confidence=combined_probs[best_key],
-        rationale=combined_rationale,
-        probs=combined_probs,
-        raw_json={
-            "sliding_window": True,
-            "windows": [r.raw_json for r in results],
-            "window_size": window_size,
-            "overlap": overlap,
-            "total_pages_analyzed": sum(len(r.raw_json.get('pages_analyzed', [])) for r in results),
-        },
+    page_numbers = _sample_vision_pages(total_pages, max_total_pages)
+    result = llm_classify_subcategories_vision_batch(
+        pdf_path,
+        page_numbers,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        temperature=temperature,
     )
+    result.raw_json = {
+        **result.raw_json,
+        "vision_sampling": "deterministic_stratified",
+        "total_pages_in_document": total_pages,
+        "sampled_page_count": len(page_numbers),
+    }
+    return result
 
 
 # Alias for backward compatibility
-llm_classify_subcategories_vision = llm_classify_subcategories_vision_sliding_window
+llm_classify_subcategories_vision = llm_classify_subcategories_vision_sampled

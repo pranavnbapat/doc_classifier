@@ -452,13 +452,78 @@ def add_contrastive_rationales(candidates: List[SubcategoryCandidate], top_k: in
             cand.contrastive_rationale = f"Near miss behind {winner.subcategory_name}"
 
 
+def _top_probability_gap(candidates: List[SubcategoryCandidate]) -> float:
+    if len(candidates) < 2:
+        return 1.0
+    return max(0.0, round(candidates[0].probability - candidates[1].probability, 4))
+
+
+def _model_keys_disagree(*sources: Optional[SourceResult]) -> bool:
+    tops = [s.subcategory_key for s in sources if s and getattr(s, "subcategory_key", "")]
+    return len(set(tops)) > 1 if len(tops) >= 2 else False
+
+
+def _candidate_visual_signals(candidate: Optional[SubcategoryCandidate]) -> bool:
+    if not candidate:
+        return False
+    return bool({"visual_heavy", "slide_indicators"} & set(candidate.features_found))
+
+
+def _should_run_text_llm(
+    *,
+    use_text_llm: bool,
+    is_agriculture_related: bool,
+) -> bool:
+    return use_text_llm and is_agriculture_related and LLM_CONFIGURED
+
+
+def _should_run_vision(
+    *,
+    use_vision: bool,
+    ocr_used: bool,
+    text_quality_ok_flag: bool,
+    heuristics_source: Optional[SourceResult],
+    best_candidate: Optional[SubcategoryCandidate],
+    current_candidates: List[SubcategoryCandidate],
+    text_source: Optional[SourceResult],
+    confidence_threshold: float,
+    gap_threshold: float,
+) -> tuple[bool, List[str]]:
+    reasons: List[str] = []
+    if not use_vision or not VISION_LLM_BASE_URL:
+        return False, reasons
+
+    top_confidence = best_candidate.confidence if best_candidate else 0.0
+    top_gap = _top_probability_gap(current_candidates)
+
+    if not text_quality_ok_flag:
+        reasons.append("text_quality_poor")
+    if ocr_used:
+        reasons.append("ocr_used")
+    if top_confidence < confidence_threshold:
+        reasons.append("low_subcategory_confidence")
+    if top_gap < gap_threshold:
+        reasons.append("close_top_candidates")
+    if _candidate_visual_signals(best_candidate):
+        reasons.append("visual_or_slide_signals")
+    if _model_keys_disagree(heuristics_source, text_source):
+        reasons.append("heuristics_text_disagreement")
+
+    deduped_reasons = list(dict.fromkeys(reasons))
+    return bool(deduped_reasons), deduped_reasons
+
+
 def classify_document(
     pdf_path: str,
     filename: str,
     require_agriculture: bool = True,
+    auto_route_models: bool = True,
     use_vision: bool = False,
     use_text_llm: bool = False,
     heuristics_alpha: float = 0.4,
+    classification_confidence_threshold: float = 0.35,
+    vision_trigger_threshold: float = 0.6,
+    candidate_gap_threshold: float = 0.12,
     fusion_strategy: str = "adaptive",
     vision_max_pages: int = 20,
     ocr_lang: str = ALL_OCR_LANGS,
@@ -471,9 +536,13 @@ def classify_document(
         pdf_path: Path to PDF file
         filename: Original filename
         require_agriculture: Whether to stop early for confident non-agriculture PDFs
+        auto_route_models: Whether to decide text/vision usage automatically
         use_vision: Whether to use Vision LLM
         use_text_llm: Whether to use Text LLM
         heuristics_alpha: Weight for heuristics (0.0-1.0), LLM gets (1-alpha)
+        classification_confidence_threshold: Minimum confidence considered acceptable
+        vision_trigger_threshold: Confidence below which vision may be triggered
+        candidate_gap_threshold: Gap below which close candidates may trigger vision
         fusion_strategy: Fusion strategy (weighted, adaptive, agreement, cascade)
         vision_max_pages: Max pages for vision analysis
         ocr_lang: Tesseract OCR languages
@@ -577,6 +646,7 @@ def classify_document(
                 "sources_used": [],
                 "fusion_enabled": False,
                 "require_agriculture": require_agriculture,
+                "auto_route_models": auto_route_models,
                 "stage_timings_ms": stage_timings_ms,
             },
         )
@@ -638,45 +708,24 @@ def classify_document(
     vision_source = None
     text_source = None
     llm_results = {}
-    
-    # Vision LLM
-    if use_vision and VISION_LLM_BASE_URL:
-        stage_start = time.time()
-        try:
-            from docint.llm.subcategory_classify import llm_classify_subcategories_vision
-            
-            llm_res = llm_classify_subcategories_vision(
-                pdf_path,
-                base_url=VISION_LLM_BASE_URL,
-                api_key=VISION_LLM_API_KEY,
-                model=VISION_LLM_MODEL,
-                window_size=4,
-                overlap=2,
-                max_total_pages=min(vision_max_pages, 50),
-                temperature=0.2,
-            )
-            
-            vision_source = convert_to_source_result(
-                subcategory_key=llm_res.subcategory_key,
-                confidence=llm_res.confidence,
-                probs=llm_res.probs,
-                source_name="vision_llm",
-                rationale=llm_res.rationale,
-            )
-            
-            llm_results["vision"] = {
-                "subcategory_key": llm_res.subcategory_key,
-                "subcategory_name": llm_res.subcategory_name,
-                "confidence": round(llm_res.confidence, 4),
-                "rationale": llm_res.rationale,
-                "model": VISION_LLM_MODEL,
-            }
-        except Exception as e:
-            llm_results["vision"] = {"error": str(e), "model": VISION_LLM_MODEL}
-        stage_timings_ms["vision_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
-    
-    # Text LLM
-    if use_text_llm and LLM_CONFIGURED:
+    routing_info: Dict[str, Any] = {
+        "auto_route_models": auto_route_models,
+        "text_llm": {"requested": use_text_llm, "used": False, "reason": None},
+        "vision_llm": {"requested": use_vision, "used": False, "reasons": []},
+        "top_candidate_gap": _top_probability_gap(final_candidates),
+    }
+
+    should_use_text_llm = _should_run_text_llm(
+        use_text_llm=use_text_llm,
+        is_agriculture_related=agri_relevance.is_agriculture_related,
+    ) if auto_route_models else (use_text_llm and LLM_CONFIGURED)
+    routing_info["text_llm"]["reason"] = (
+        "agriculture_related_default_text_stage"
+        if should_use_text_llm and auto_route_models
+        else ("manual_request" if should_use_text_llm else "disabled_or_not_configured")
+    )
+
+    if should_use_text_llm:
         stage_start = time.time()
         try:
             from docint.llm.subcategory_classify import llm_classify_subcategories_text
@@ -705,9 +754,57 @@ def classify_document(
                 "rationale": llm_res.rationale,
                 "model": LLM_MODEL,
             }
+            routing_info["text_llm"]["used"] = True
         except Exception as e:
             llm_results["text"] = {"error": str(e), "model": LLM_MODEL}
         stage_timings_ms["text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
+
+    should_use_vision, vision_reasons = _should_run_vision(
+        use_vision=use_vision,
+        ocr_used=doc.source == "ocr",
+        text_quality_ok_flag=quality.ok,
+        heuristics_source=heuristics_source,
+        best_candidate=best_candidate,
+        current_candidates=final_candidates,
+        text_source=text_source,
+        confidence_threshold=vision_trigger_threshold,
+        gap_threshold=candidate_gap_threshold,
+    ) if auto_route_models else ((use_vision and bool(VISION_LLM_BASE_URL)), ["manual_request"] if use_vision and VISION_LLM_BASE_URL else [])
+    routing_info["vision_llm"]["reasons"] = vision_reasons
+
+    if should_use_vision:
+        stage_start = time.time()
+        try:
+            from docint.llm.subcategory_classify import llm_classify_subcategories_vision
+            
+            llm_res = llm_classify_subcategories_vision(
+                pdf_path,
+                base_url=VISION_LLM_BASE_URL,
+                api_key=VISION_LLM_API_KEY,
+                model=VISION_LLM_MODEL,
+                max_total_pages=min(vision_max_pages, 8),
+                temperature=0.2,
+            )
+            
+            vision_source = convert_to_source_result(
+                subcategory_key=llm_res.subcategory_key,
+                confidence=llm_res.confidence,
+                probs=llm_res.probs,
+                source_name="vision_llm",
+                rationale=llm_res.rationale,
+            )
+            
+            llm_results["vision"] = {
+                "subcategory_key": llm_res.subcategory_key,
+                "subcategory_name": llm_res.subcategory_name,
+                "confidence": round(llm_res.confidence, 4),
+                "rationale": llm_res.rationale,
+                "model": VISION_LLM_MODEL,
+            }
+            routing_info["vision_llm"]["used"] = True
+        except Exception as e:
+            llm_results["vision"] = {"error": str(e), "model": VISION_LLM_MODEL}
+        stage_timings_ms["vision_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
     
     # 6) Intelligent fusion if multiple sources
     fusion_info = None
@@ -773,7 +870,7 @@ def classify_document(
         final_best = final_candidates[0]
         stage_timings_ms["fusion_ms"] = round((time.time() - stage_start) * 1000, 2)
     
-    threshold_met = final_best.confidence >= 0.35 if final_best else False
+    threshold_met = final_best.confidence >= classification_confidence_threshold if final_best else False
     
     processing_time_ms = (time.time() - start_time) * 1000
     
@@ -807,6 +904,11 @@ def classify_document(
             "sources_used": [s.source_name for s in sources_for_fusion],
             "fusion_enabled": fusion_info is not None,
             "require_agriculture": require_agriculture,
+            "auto_route_models": auto_route_models,
+            "routing": routing_info,
+            "classification_confidence_threshold": classification_confidence_threshold,
+            "vision_trigger_threshold": vision_trigger_threshold,
+            "candidate_gap_threshold": candidate_gap_threshold,
             "stage_timings_ms": stage_timings_ms,
         },
     )
@@ -927,22 +1029,39 @@ async def health(request: Request):
 async def classify_endpoint(
     request: Request,
     file: UploadFile = File(..., description="PDF file to classify"),
-    require_agriculture: bool = Query(True, description="Skip subcategory classification for confident non-agriculture PDFs"),
-    use_vision: bool = Query(False, description="Use Vision LLM (InternVL)"),
-    use_text_llm: bool = Query(False, description="Use Text LLM (Qwen)"),
+    require_agriculture: bool = Query(True, description="Skip subcategory classification for non-agriculture PDFs"),
+    auto_route_models: bool = Query(True, description="Automatically decide whether text and vision models should be used"),
+    use_vision: bool = Query(True, description="Allow Vision LLM (InternVL) when routing decides it is needed"),
+    use_text_llm: bool = Query(True, description="Allow Text LLM (Qwen) for agriculture-related documents"),
     heuristics_alpha: float = Query(
         0.4,
         ge=0.0,
         le=1.0,
         description="Weight for heuristics (0.4 = 40% heuristics, 60% LLM)"
     ),
+    classification_confidence_threshold: float = Query(0.35, ge=0.0, le=1.0, description="Confidence threshold used to mark subtype classification as strong enough"),
+    vision_trigger_threshold: float = Query(0.6, ge=0.0, le=1.0, description="Subcategory confidence threshold below which vision may be triggered"),
+    candidate_gap_threshold: float = Query(0.12, ge=0.0, le=1.0, description="Top-candidate probability gap below which vision may be triggered"),
     fusion_strategy: str = Query(
         "adaptive",
         description="Fusion strategy: weighted, adaptive, agreement, cascade"
     ),
-    vision_max_pages: int = Query(20, ge=1, le=50),
-    ocr_lang: str = Query(ALL_OCR_LANGS),
-    ocr_max_pages: int = Query(10, ge=1, le=200),
+    vision_max_pages: int = Query(
+        8,
+        ge=1,
+        le=12,
+        description="Maximum representative pages sampled for vision analysis; pages are sampled deterministically rather than scanning the whole document"
+    ),
+    ocr_lang: Optional[str] = Query(
+        None,
+        description="Optional Tesseract OCR language bundle used only when OCR fallback is triggered; if omitted, the configured multilingual default is used"
+    ),
+    ocr_max_pages: int = Query(
+        5,
+        ge=1,
+        le=50,
+        description="Maximum pages sent through OCR fallback when extracted text quality is poor"
+    ),
 ):
     """Classify a PDF document with optional LLM fusion."""
     filename = file.filename or "unknown.pdf"
@@ -964,12 +1083,16 @@ async def classify_endpoint(
             pdf_path=tmp_path,
             filename=filename,
             require_agriculture=require_agriculture,
+            auto_route_models=auto_route_models,
             use_vision=use_vision,
             use_text_llm=use_text_llm,
             heuristics_alpha=heuristics_alpha,
+            classification_confidence_threshold=classification_confidence_threshold,
+            vision_trigger_threshold=vision_trigger_threshold,
+            candidate_gap_threshold=candidate_gap_threshold,
             fusion_strategy=fusion_strategy,
             vision_max_pages=vision_max_pages,
-            ocr_lang=ocr_lang,
+            ocr_lang=ocr_lang or ALL_OCR_LANGS,
             ocr_max_pages=ocr_max_pages,
         )
         return result
