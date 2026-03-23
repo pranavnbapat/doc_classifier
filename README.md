@@ -1,14 +1,22 @@
 # KO Classifier API
 
-FastAPI service for explainable PDF document subcategory classification. The current runtime scope is PDF-based document classification into 11 consolidated document subcategories, with deterministic heuristics always available and optional text and vision LLM augmentation.
+FastAPI service for explainable category and subcategory classification. The current runtime scope covers document-family, tabular, image, audio, and video uploads in `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`, with deterministic heuristics always available and optional text and vision LLM augmentation.
 
-The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, but the `/classify` endpoint in this repository currently classifies PDFs as document subcategories only.
+The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`. The current `/classify` endpoint now infers `Document`, `Dataset`, `Image`, `Audio`, and `Video` for the supported file set and routes each branch to its current subtype logic.
 
 ## What The API Does
 
-- Extracts text from PDFs with PyMuPDF.
-- Falls back to OCR when extracted text quality is poor.
-- Scores the document against 11 consolidated document subcategories using measurable heuristic signals.
+- Extracts text from PDFs, TXT files, DOCX files, PPTX files, CSV/TSV files, and XLSX files through a normalized ingestion layer.
+- Falls back to OCR for PDFs when extracted text quality is poor.
+- Uses image OCR and a vision-first image classifier for `.jpg`, `.jpeg`, and `.png` uploads.
+- Uses optional audio transcription for `.mp3`, `.wav`, and `.m4a` uploads before agriculture and subtype classification.
+- Uses optional FFmpeg-based frame sampling and audio extraction for video uploads before agriculture and subtype classification.
+- Infers a high-level category (`Document`, `Dataset`, `Image`, `Audio`, or `Video`) for the supported file types.
+- Scores `Document` uploads against 11 consolidated document subcategories using measurable heuristic signals.
+- Scores `Dataset` uploads against 8 consolidated dataset subcategories using heuristic schema/content signals and an optional dataset-specific text LLM path.
+- Scores `Image` uploads against 3 consolidated image subcategories using a vision-first classifier with OCR-backed fallback heuristics.
+- Scores `Audio` uploads against 6 consolidated audio subcategories using transcript-first heuristics and an optional audio-specific text LLM path.
+- Scores `Video` uploads against 6 consolidated video subcategories using sampled frames, optional transcription, and category-specific fusion.
 - Optionally asks a text LLM and/or a vision LLM to classify the same document.
 - Fuses heuristic and LLM probabilities with configurable strategies.
 - Returns feature-level evidence, rationale text, and contrastive explanations for top candidates.
@@ -31,6 +39,41 @@ The consolidation rationale is documented in:
 
 - [document_subcategories_consolidation.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/document_subcategories_consolidation.md)
 - [subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/subcategories_consolidation_analysis.md)
+
+## Current Dataset Subcategories
+
+- `Geospatial Data`
+- `Video Data`
+- `Audio Data`
+- `Image Data`
+- `Text Data`
+- `Graph/Network Data`
+- `Agricultural Production Data`
+- `Environmental & Temporal Data`
+
+## Current Image Subcategories
+
+- `Data Visualization`
+- `Figure/Image`
+- `Map`
+
+## Current Audio Subcategories
+
+- `Tutorial`
+- `Educational/Training Media`
+- `Recorded Session`
+- `Interview`
+- `Q&A Session`
+- `Audio Program`
+
+## Current Video Subcategories
+
+- `Tutorial`
+- `Educational/Training Media`
+- `Recorded Session`
+- `Interview`
+- `Q&A Session`
+- `Demonstration/Field Recording`
 
 ## Explainability Model
 
@@ -58,7 +101,7 @@ Those same criteria are now used in three places:
 
 ## Agriculture Relevance
 
-The API now also returns an `agriculture_relevance` block for each classified PDF.
+The API now also returns an `agriculture_relevance` block for each classified asset.
 
 The current design is staged:
 
@@ -80,6 +123,11 @@ Relevant settings:
 - `AGRI_EMBEDDING_OVERRIDE_THRESHOLD=0.74`
 - `AGRI_EMBEDDING_BLEND_WEIGHT=0.45`
 - `AGRI_ENABLE_LLM_FALLBACK=true`
+- `MEDIA_TRANSCRIBER_ENABLED=false`
+- `MEDIA_TRANSCRIBER_BASE_URL=...`
+- `MEDIA_TRANSCRIBER_WHISPER_MODEL=medium`
+- `MEDIA_TRANSCRIBER_MODE=auto`
+- FFmpeg available locally for video frame sampling and audio extraction
 
 Operational note:
 
@@ -89,15 +137,48 @@ Operational note:
 
 ### `POST /classify`
 
-Classifies a PDF document.
+Classifies a supported KO asset file.
 
 Important runtime constraint:
 
-- only `.pdf` files are currently accepted by the API
+- supported file types are currently `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`
+- OCR fallback currently applies to PDFs and images
+- OCR also applies to image files
+- vision routing currently applies to PDFs and image files
+- audio transcription currently applies to audio files when the transcription backend is configured
+- video frame sampling currently applies to video files when FFmpeg is available
+- video audio transcription currently applies to video files when both FFmpeg and the transcription backend are configured
+- synchronous media caps are enforced for large uploads:
+  - `MAX_AUDIO_DURATION_SEC=3000`
+  - `MAX_VIDEO_DURATION_SEC=3000`
+  - `MAX_AUDIO_UPLOAD_SIZE_MB=768`
+  - `MAX_VIDEO_UPLOAD_SIZE_MB=1024`
+  - `MAX_REQUEST_BODY_MB=1024`
+- tabular ingestion uses bounded previews for speed:
+  - `TABULAR_MAX_ROWS=100`
+  - `TABULAR_PREVIEW_ROWS=30`
+  - `XLSX_MAX_SHEETS=10`
+  - `XLSX_MAX_ROWS_PER_SHEET=25`
+- category inference currently routes delimited files to `Dataset` and routes document-family files to `Document`
+- category inference routes image files to `Image`
+- category inference routes audio files to `Audio`
+- category inference routes video files to `Video`
+- `Dataset` uploads now receive dataset subtype scoring
+- `Document` uploads receive document subtype scoring
+- `Image` uploads receive image subtype scoring
+- `Audio` uploads receive audio subtype scoring when a usable transcript is available
+- `Video` uploads receive video subtype scoring when sampled frames and/or a usable transcript are available
+
+Deployment note:
+
+- the app now performs an early `Content-Length` check using `MAX_REQUEST_BODY_MB`
+- to reject oversized uploads before they reach the app process, the reverse proxy should enforce the same or lower limit
+- for Traefik, use the request body buffering middleware with a matching limit
+- for Nginx, set `client_max_body_size 1024M;` or a lower value if preferred
 
 Query parameters:
 
-- `require_agriculture`: if `true`, non-agriculture PDFs return early and skip subcategory classification
+- `require_agriculture`: if `true`, non-agriculture documents return early and skip subcategory classification
 - `auto_route_models`: if `true`, the API decides when text and vision models are actually used
 - `use_vision`: allow InternVL-style vision classification when routing decides it is needed; default `true`
 - `use_text_llm`: allow text LLM classification for agriculture-related documents; default `true`
@@ -107,14 +188,14 @@ Query parameters:
 - `candidate_gap_threshold`: probability gap threshold below which close candidates may trigger vision
 - `fusion_strategy`: `weighted`, `adaptive`, `agreement`, or `cascade`
 - `vision_max_pages`: maximum sampled pages passed to the vision model; runtime uses deterministic representative-page sampling rather than scanning every page
-- `ocr_lang`: Tesseract OCR language bundle
-- `ocr_max_pages`: maximum pages sent through OCR fallback
+- `ocr_lang`: optional Tesseract OCR language bundle, used only when PDF OCR fallback is triggered
+- `ocr_max_pages`: maximum pages sent through PDF OCR fallback
 
 Example:
 
 ```bash
 curl -X POST "http://localhost:8011/classify?require_agriculture=true&auto_route_models=true&use_text_llm=true&use_vision=true&fusion_strategy=adaptive" \
-  -F "file=@document.pdf"
+  -F "file=@document.docx"
 ```
 
 Representative response fields:
@@ -123,8 +204,10 @@ Representative response fields:
 - `all_candidates`: full ranked list
 - `classification_skipped`: whether classification stopped after the agriculture gate
 - `skip_reason`: explanation when classification is intentionally skipped
+- `category_inference`: inferred high-level category, confidence, and rationale
 - `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results
 - `processing_info.routing`: whether text and vision were requested, used, and why
+- `processing_info.routing.audio_mode`: present for the audio branch
 - `processing_info.stage_timings_ms`: latency breakdown by extraction, OCR, agriculture, heuristics, LLM, and fusion stages
 - `feature_details`: feature-level evidence and excerpts
 - `rationale`: direct explanation for the candidate
@@ -164,6 +247,17 @@ Returns the active document subcategories together with their criteria metadata.
 ### `GET /health`
 
 Returns service and model configuration status.
+
+The health payload now also exposes operational readiness for the newer media branches:
+
+- `models.audio_transcription.enabled`
+- `models.audio_transcription.configured`
+- `models.video_tooling.ffmpeg_available`
+- `models.video_tooling.ffprobe_available`
+- `models.video_tooling.frame_sampling_ready`
+- `models.video_tooling.audio_extract_ready`
+
+These fields indicate whether the `Audio` and `Video` branches are fully operable or will fall back to partial behavior / skip paths.
 
 Operational note:
 

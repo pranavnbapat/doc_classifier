@@ -2,25 +2,33 @@
 
 ## Scope
 
-This service currently implements PDF-based document subcategory classification. It does not yet enforce the broader KO category-selection policy in runtime. That policy work, including `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, is documented separately in:
+This service currently implements category and subtype classification for `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`. It does not yet enforce the broader KO category-selection policy in runtime. That policy work, including `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`, is documented separately in:
 
 - [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md)
 - [subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/subcategories_consolidation_analysis.md)
 
-The live API path in this repository accepts PDFs and classifies them into 11 consolidated document subcategories.
+The live API path in this repository accepts document-family, tabular, image, audio, and video uploads, infers a high-level category, and currently classifies:
+
+- `Document` assets into 11 consolidated document subcategories
+- `Dataset` assets into 8 consolidated dataset subcategories
+- `Image` assets into 3 consolidated image subcategories
+- `Audio` assets into 6 consolidated audio subcategories
+- `Video` assets into 6 consolidated video subcategories
 
 ## High-Level Flow
 
 ```text
-Client PDF upload
+Client asset upload
   -> FastAPI request handling
-  -> PDF text extraction
-  -> OCR fallback if text quality is poor
-  -> heuristic feature extraction and scoring
+  -> normalized ingestion (pdf/txt/docx/pptx/csv/tsv/xlsx/jpg/jpeg/png/mp3/wav/m4a/mp4/avi/mov/...)
+  -> category inference (Document vs Dataset vs Image vs Audio vs Video)
+  -> OCR fallback for PDFs and images if text quality is poor
+  -> audio transcription for audio files when configured
+  -> frame sampling and optional audio extraction for video files when configured
   -> agriculture relevance gate
-  -> heuristic subcategory scoring
-  -> text LLM classification for agri docs when enabled
-  -> selective vision classification when routing decides it is needed
+  -> category-specific heuristic subtype scoring
+  -> text LLM classification for agri docs, datasets, audio, and transcript-rich videos when enabled
+  -> selective vision classification for PDFs, vision-first classification for images, and sampled-frame classification for videos
   -> probability fusion
   -> ranked response with evidence and contrastive rationale
 ```
@@ -31,19 +39,45 @@ Client PDF upload
 
 - Entry point: [app.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/app.py)
 - Endpoint: `POST /classify`
-- Current file constraint: `.pdf` only
+- Current file types: `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, `.rmvb`
 - Authentication: Basic Auth when `DOCINT_AUTH_USERS` and `DOCINT_AUTH_PASSWORD` are configured
 - Exception: `GET /health` is intentionally unauthenticated so container and platform health probes can work without credentials
 
 ### 2. Text Extraction
 
-- Primary path: [pdf_text.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/extract/pdf_text.py)
+- Dispatcher: [dispatcher.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/dispatcher.py)
+- Normalized model: [models.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/models.py)
+- PDF path: [pdf.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/pdf.py)
+- TXT path: [text.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/text.py)
+- DOCX path: [docx.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/docx.py)
+- PPTX path: [pptx.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/pptx.py)
+- Tabular path: [tabular.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/tabular.py)
+- Image path: [image.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/image.py)
+- Audio path: [audio.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/audio.py)
+- Video path: [video.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/ingest/video.py)
 - Quality check: [quality.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/extract/quality.py)
 - OCR fallback: [ocr.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/extract/ocr.py)
+- Audio transcription: [transcribe.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/audio/transcribe.py)
+- Video helpers: [extract.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/video/extract.py)
 
-The service first tries direct PDF text extraction. If the resulting text does not meet the quality threshold, it falls back to OCR.
+The service first normalizes supported document, tabular, image, audio, and video files into a common internal representation. OCR fallback is currently available for PDFs and images when extracted text quality is poor. CSV, TSV, and XLSX files are flattened into text summaries for agriculture gating and dataset classification. Audio files use optional transcription before agriculture gating and audio subtype scoring. Video files use optional audio extraction plus transcription and optional sampled-frame extraction through FFmpeg.
 
-### 3. Agriculture Relevance Gate
+### 3. Category Inference
+
+- Module: [infer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/category/infer.py)
+
+The service infers a high-level category before document-subcategory scoring:
+
+- `pdf`, `txt`, `docx`, `pptx` -> `Document`
+- `csv`, `tsv` -> `Dataset`
+- `xlsx` -> `Dataset` or `Document` depending on lightweight spreadsheet signals
+- `jpg`, `jpeg`, `png` -> `Image`
+- `mp3`, `wav`, `m4a` -> `Audio`
+- common video formats such as `mp4`, `avi`, `mov`, `wmv`, `mpeg`, `mkv`, `webm` -> `Video`
+
+If the inferred category is `Dataset`, `Image`, `Audio`, or `Video`, the current `/classify` endpoint runs that category's subtype scoring path. If the inferred category is not currently supported for subtype scoring, the API returns category and agriculture results and skips subcategory classification.
+
+### 4. Agriculture Relevance Gate
 
 - Module: [agriculture_pipeline.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/domain/agriculture_pipeline.py)
 - Lexicon source: [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon.json)
@@ -56,7 +90,71 @@ The service now performs agriculture relevance assessment before document-subcat
 
 If `require_agriculture=true` and the file is assessed as non-agriculture, the API returns early and skips subcategory classification.
 
-### 4. Feature Extraction
+### 5. Dataset Subtype Scoring
+
+- Module: [dataset_scorer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/category/dataset_scorer.py)
+
+The dataset branch currently uses heuristic scoring over flattened tabular previews and schema/content markers, with an optional dataset-specific text-LLM classifier when `use_text_llm=true`. The active dataset subtype set is:
+
+- `Geospatial Data`
+- `Video Data`
+- `Audio Data`
+- `Image Data`
+- `Text Data`
+- `Graph/Network Data`
+- `Agricultural Production Data`
+- `Environmental & Temporal Data`
+
+The document-oriented text and vision LLM prompts are not reused for datasets. Datasets now have a dedicated text-LLM prompt path; vision remains disabled for dataset routing.
+
+### 6. Image Subtype Scoring
+
+- Module: [image_scorer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/category/image_scorer.py)
+- Vision helper: [subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/llm/subcategory_classify.py)
+
+The image branch uses a vision-first classifier and lightweight OCR-text heuristics as fallback. The active image subtype set is:
+
+- `Data Visualization`
+- `Figure/Image`
+- `Map`
+
+For images, vision is the primary classifier. OCR text is used as supporting evidence and fallback only.
+
+### 7. Audio Subtype Scoring
+
+- Module: [audio_scorer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/category/audio_scorer.py)
+- Transcription helper: [transcribe.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/audio/transcribe.py)
+- LLM helper: [subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/llm/subcategory_classify.py)
+
+The audio branch is transcript-first. It uses optional audio transcription to obtain text, then applies heuristic subtype scoring and an optional audio-specific text-LLM classifier. The active audio subtype set is:
+
+- `Tutorial`
+- `Educational/Training Media`
+- `Recorded Session`
+- `Interview`
+- `Q&A Session`
+- `Audio Program`
+
+If no usable transcript is available, the API returns a skip response instead of pretending to classify the audio from filename-only evidence.
+
+### 8. Video Subtype Scoring
+
+- Module: [video_scorer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/category/video_scorer.py)
+- Extraction helpers: [extract.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/video/extract.py)
+- LLM helper: [subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/llm/subcategory_classify.py)
+
+The video branch is multimodal. It uses transcript text when audio extraction plus transcription succeeds, and it uses sampled video frames through the vision model when FFmpeg and the vision backend are available. The active video subtype set is:
+
+- `Tutorial`
+- `Educational/Training Media`
+- `Recorded Session`
+- `Interview`
+- `Q&A Session`
+- `Demonstration/Field Recording`
+
+If neither transcript text nor sampled-frame evidence is available, the API returns a skip response instead of inventing a subtype from filename-only evidence.
+
+### 9. Feature Extraction
 
 The heuristic layer is built around measurable signals rather than opaque labels. Core extraction helpers live under:
 
@@ -80,7 +178,7 @@ The active heuristic signal set currently covers 27 features, including:
 - communication and policy signals such as `news_timeliness`, `press_release_format`, `regulatory_update_markers`, `compliance_language`, `governance_references`
 - layout signals such as `slide_indicators`, `visual_heavy`, `short_form`
 
-### 5. Heuristic Scoring
+### 10. Heuristic Scoring
 
 - Scorer: [subcategory_scorer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/rubrics/subcategory_scorer.py)
 - Criteria source of truth: [subcategories.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/rubrics/subcategories.py)
@@ -108,12 +206,12 @@ Recent explainability-oriented changes include:
 - reduced phantom evidence for thesis and conference detection
 - subcategory-specific bonuses and penalties for close competitors
 
-### 6. Text LLM Classification
+### 11. Text LLM Classification
 
 - Module: [subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/llm/subcategory_classify.py)
 - Intended model family: Qwen or any OpenAI-compatible text endpoint
 
-For agriculture-related documents, text LLM is allowed by default when `use_text_llm=true`. It receives extracted document text and is prompted with the same criteria vocabulary used by heuristics:
+For agriculture-related documents, datasets, audio assets, and transcript-rich videos, text LLM is allowed by default when `use_text_llm=true`. It receives extracted text or transcript content and is prompted with category-appropriate taxonomy criteria.
 
 - detectable features
 - positive signals
@@ -129,7 +227,7 @@ The prompt also asks the model to report:
 
 This keeps the LLM output closer to the auditable heuristic taxonomy instead of allowing purely free-form reasoning.
 
-### 7. Selective Vision LLM Classification
+### 12. Selective Vision LLM Classification
 
 - Module: [subcategory_classify.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/llm/subcategory_classify.py)
 - Intended model family: InternVL or any OpenAI-compatible vision endpoint
@@ -143,9 +241,9 @@ Vision is no longer treated as a default whole-document pass. When `use_vision=t
 - visual/slide cues
 - disagreement between heuristics and text LLM
 
-When vision is used, the service sends deterministic representative sampled pages rather than overlapping sliding windows.
+When vision is used, the service currently sends deterministic representative sampled PDF pages rather than overlapping page windows, sampled frames for video, and full images for image uploads.
 
-### 8. Fusion
+### 13. Fusion
 
 - Module: [intelligent_fusion.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/fusion/intelligent_fusion.py)
 
@@ -204,12 +302,12 @@ The `/subcategories` endpoint also exposes criteria metadata so that documentati
 
 ### What Is Implemented
 
-- PDF upload and classification
+- document-family, tabular, image, audio, and video upload and classification (`pdf`, `txt`, `docx`, `pptx`, `csv`, `tsv`, `xlsx`, `jpg`, `jpeg`, `png`, `mp3`, `wav`, `m4a`, `mp4`, `avi`, `mov`, `wmv`, `mpeg`, `mpg`, `mkv`, `flv`, `webm`, `3gp`, `mts`, `m2ts`, `vob`, `rmvb`)
 - agriculture-first early reject
 - heuristic scoring with measurable signals
 - criteria-backed contrastive explanations
-- text LLM allowed by default for agriculture-related documents
-- selective sampled-page vision classification
+- text LLM allowed by default for agriculture-related documents, datasets, audio, and transcript-rich videos
+- selective sampled-page vision classification for PDFs, vision-first classification for images, and sampled-frame classification for videos
 - fusion across sources
 
 ### What Is Documented But Not Yet Enforced In Runtime
@@ -217,7 +315,7 @@ The `/subcategories` endpoint also exposes criteria metadata so that documentati
 - category auto-selection by KO mode
 - category filtering for file-based versus URL-based KOs
 - `Software Application` availability only for URL-based KOs
-- broader non-document category handling such as `Dataset`, `Video`, `Audio`, and `Image`
+- broader non-document category handling beyond the current `Dataset`, `Image`, `Audio`, and `Video` branches
 
 Those rules are part of the taxonomy and ingestion design work, not the current `/classify` implementation.
 
@@ -227,8 +325,18 @@ Those rules are part of the taxonomy and ingestion design work, not the current 
 
 - install Python dependencies from [requirements.txt](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/requirements.txt)
 - install `poppler-utils`, `tesseract-ocr`, and required language packs
+- install `ffmpeg` if `Video` uploads should support frame sampling and audio extraction
 - configure `.env`
 - run via [start_server.sh](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/start_server.sh), [start_server.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/start_server.py), or `uvicorn`
+
+## Operational Readiness
+
+The `/health` endpoint now exposes branch readiness for media processing under `models`:
+
+- `audio_transcription`
+  Shows whether the transcript backend is enabled and configured for `Audio` and transcript-first `Video` handling.
+- `video_tooling`
+  Shows whether `ffmpeg` and `ffprobe` are available for sampled-frame extraction and audio extraction from video.
 
 ### Docker
 

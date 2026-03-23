@@ -9,6 +9,7 @@ from typing import List, Optional
 import pytesseract
 
 from pdf2image import convert_from_path
+from PIL import Image
 
 from .pdf_text import ExtractedDoc
 
@@ -96,6 +97,36 @@ def ocr_pdf(
             "ocr_pages": len(images),
             "pdf_total_pages": pdf_total_pages,
             "dpi": dpi,
+            "lang": lang,
+            "engine": "tesseract",
+            "tesseract_config": tesseract_config,
+        },
+    )
+
+
+def ocr_image(
+    image_path: str,
+    *,
+    lang: str = "eng",
+    tesseract_cmd: Optional[str] = None,
+) -> ExtractedDoc:
+    """OCR a single image file."""
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    img = Image.open(image_path)
+    tesseract_config = "--psm 6"
+    text = pytesseract.image_to_string(img, lang=lang, config=tesseract_config) or ""
+    text = _clean_ocr_text(text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    return ExtractedDoc(
+        text=text,
+        lines=lines,
+        pages=1,
+        source="ocr",
+        meta={
+            "image_path": image_path,
             "lang": lang,
             "engine": "tesseract",
             "tesseract_config": tesseract_config,

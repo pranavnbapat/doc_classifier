@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
+
+from docint.audio.transcribe import AudioTranscriptionResult, transcribe_audio_file
+
+
+@dataclass
+class VideoFrameSamplingResult:
+    available: bool
+    used: bool
+    frame_paths: List[str]
+    method: str
+    rationale: str
+
+
+def _has_ffmpeg() -> bool:
+    return bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
+
+
+def media_duration_seconds(media_path: str) -> Optional[float]:
+    if not _has_ffmpeg():
+        return None
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            media_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+        return float(data.get("format", {}).get("duration"))
+    except Exception:
+        return None
+
+
+def sample_video_frames(video_path: str, max_frames: int = 6) -> VideoFrameSamplingResult:
+    if not _has_ffmpeg():
+        return VideoFrameSamplingResult(
+            available=False,
+            used=False,
+            frame_paths=[],
+            method="ffmpeg_unavailable",
+            rationale="FFmpeg/ffprobe not available for video frame sampling",
+        )
+
+    duration = media_duration_seconds(video_path)
+    if not duration or duration <= 0:
+        return VideoFrameSamplingResult(
+            available=False,
+            used=False,
+            frame_paths=[],
+            method="ffprobe_failed",
+            rationale="Could not determine video duration for frame sampling",
+        )
+
+    sample_size = max(1, min(max_frames, 8))
+    if sample_size == 1:
+        positions = [0.5]
+    else:
+        positions = [i / (sample_size - 1) for i in range(sample_size)]
+
+    temp_dir = tempfile.mkdtemp(prefix="video_frames_")
+    frame_paths: List[str] = []
+    for idx, pos in enumerate(positions, start=1):
+        seconds = max(0.0, min(duration, duration * pos))
+        output_path = str(Path(temp_dir) / f"frame_{idx:02d}.png")
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{seconds:.3f}",
+                "-i",
+                video_path,
+                "-frames:v",
+                "1",
+                output_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and Path(output_path).exists():
+            frame_paths.append(output_path)
+
+    if not frame_paths:
+        return VideoFrameSamplingResult(
+            available=True,
+            used=False,
+            frame_paths=[],
+            method="ffmpeg_sampling_failed",
+            rationale="Frame extraction did not produce any usable sampled frames",
+        )
+
+    return VideoFrameSamplingResult(
+        available=True,
+        used=True,
+        frame_paths=frame_paths,
+        method="ffmpeg_stratified_frames",
+        rationale=f"Sampled {len(frame_paths)} representative frames across the video",
+    )
+
+
+def transcribe_video_audio(video_path: str) -> AudioTranscriptionResult:
+    if not shutil.which("ffmpeg"):
+        return AudioTranscriptionResult(
+            available=False,
+            used=False,
+            text="",
+            method="ffmpeg_unavailable",
+            model=None,
+            rationale="FFmpeg not available for audio extraction from video",
+        )
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        audio_path = tmp.name
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-vn",
+            "-acodec",
+            "mp3",
+            audio_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not Path(audio_path).exists():
+        return AudioTranscriptionResult(
+            available=False,
+            used=False,
+            text="",
+            method="audio_extract_failed",
+            model=None,
+            rationale="Could not extract an audio track from the video for transcription",
+        )
+
+    return transcribe_audio_file(audio_path)
