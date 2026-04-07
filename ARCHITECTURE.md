@@ -7,7 +7,7 @@ This service currently implements category and subtype classification for `.pdf`
 - [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md)
 - [subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/subcategories_consolidation_analysis.md)
 
-The live API path in this repository accepts document-family, tabular, image, audio, and video uploads, infers a high-level category, and currently classifies:
+The live API path in this repository accepts document-family, tabular, image, audio, and video uploads, plus public URLs. It now runs Agri Gate before downstream processing, infers a high-level category, and currently classifies:
 
 - `Document` assets into 11 consolidated document subcategories
 - `Dataset` assets into 8 consolidated dataset subcategories
@@ -18,10 +18,11 @@ The live API path in this repository accepts document-family, tabular, image, au
 ## High-Level Flow
 
 ```text
-Client asset upload
+Client file upload or URL submission
+  -> Agri Gate security screening
   -> FastAPI request handling
-  -> normalized ingestion (pdf/txt/docx/pptx/csv/tsv/xlsx/jpg/jpeg/png/mp3/wav/m4a/mp4/avi/mov/...)
-  -> category inference (Document vs Dataset vs Image vs Audio vs Video)
+  -> normalized file ingestion or PageSense URL text extraction
+  -> deterministic file MIME/type routing or URL category inference
   -> OCR fallback for PDFs and images if text quality is poor
   -> audio transcription for audio files when configured
   -> frame sampling and optional audio extraction for video files when configured
@@ -39,9 +40,17 @@ Client asset upload
 
 - Entry point: [app.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/app.py)
 - Endpoint: `POST /classify`
+- Endpoint: `POST /classify-url`
 - Current file types: `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, `.rmvb`
+- URL mode: public `http` and `https` targets only
 - Authentication: Basic Auth when `DOCINT_AUTH_USERS` and `DOCINT_AUTH_PASSWORD` are configured
 - Exception: `GET /health` is intentionally unauthenticated so container and platform health probes can work without credentials
+
+The runtime now calls:
+
+- [agrigate.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/integrations/agrigate.py)
+
+before file classification and before URL extraction. If strict mode is enabled and Agri Gate rejects the input, the request stops immediately.
 
 ### 2. Text Extraction
 
@@ -59,8 +68,9 @@ Client asset upload
 - OCR fallback: [ocr.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/extract/ocr.py)
 - Audio transcription: [transcribe.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/audio/transcribe.py)
 - Video helpers: [extract.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/video/extract.py)
+- URL extraction: [pagesense.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/integrations/pagesense.py)
 
-The service first normalizes supported document, tabular, image, audio, and video files into a common internal representation. OCR fallback is currently available for PDFs and images when extracted text quality is poor. CSV, TSV, and XLSX files are flattened into text summaries for agriculture gating and dataset classification. Audio files use optional transcription before agriculture gating and audio subtype scoring. Video files use optional audio extraction plus transcription and optional sampled-frame extraction through FFmpeg.
+The service first normalizes supported document, tabular, image, audio, and video files into a common internal representation. OCR fallback is currently available for PDFs and images when extracted text quality is poor. CSV, TSV, and XLSX files are flattened into text summaries for agriculture gating and dataset classification. Audio files use optional transcription before agriculture gating and audio subtype scoring. Video files use optional audio extraction plus transcription and optional sampled-frame extraction through FFmpeg. URL submissions are sent to PageSense, which returns raw readable text only, so the URL branch is text-only after extraction.
 
 ### 3. Category Inference
 
@@ -76,6 +86,14 @@ The service infers a high-level category before document-subcategory scoring:
 - common video formats such as `mp4`, `avi`, `mov`, `wmv`, `mpeg`, `mkv`, `webm` -> `Video`
 
 If the inferred category is `Dataset`, `Image`, `Audio`, or `Video`, the current `/classify` endpoint runs that category's subtype scoring path. If the inferred category is not currently supported for subtype scoring, the API returns category and agriculture results and skips subcategory classification.
+
+For `POST /classify-url`, category inference is text-based rather than extension-driven. The current URL branch can infer:
+
+- `Dataset`
+- `Software Application`
+- `Document`
+
+`Software Application` currently returns category-level output only and skips subtype scoring.
 
 ### 4. Agriculture Relevance Gate
 
@@ -212,6 +230,8 @@ Recent explainability-oriented changes include:
 - Intended model family: Qwen or any OpenAI-compatible text endpoint
 
 For agriculture-related documents, datasets, audio assets, and transcript-rich videos, text LLM is allowed by default when `use_text_llm=true`. It receives extracted text or transcript content and is prompted with category-appropriate taxonomy criteria.
+
+The runtime now also applies lightweight language detection. When the extracted text is strongly non-English, the text LLM becomes the primary subtype classifier for text-driven branches so the system does not over-trust English-oriented heuristic cues.
 
 - detectable features
 - positive signals

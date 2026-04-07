@@ -1,8 +1,8 @@
 # KO Classifier API
 
-FastAPI service for explainable category and subcategory classification. The current runtime scope covers document-family, tabular, image, audio, and video uploads in `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`, with deterministic heuristics always available and optional text and vision LLM augmentation.
+FastAPI service for explainable category and subcategory classification. The current runtime scope covers document-family, tabular, image, audio, and video uploads in `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`, plus public `http`/`https` URLs through a PageSense-backed text extraction path. Deterministic heuristics are always available, with optional text and vision LLM augmentation where the runtime path supports them. Agri Gate now screens both files and URLs before downstream classification.
 
-The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`. The current `/classify` endpoint now infers `Document`, `Dataset`, `Image`, `Audio`, and `Video` for the supported file set and routes each branch to its current subtype logic.
+The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`. The current `/classify` endpoint now uses deterministic MIME/file-type routing for `Document`, `Dataset`, `Image`, `Audio`, and `Video`, and routes each branch to its current subtype logic.
 
 ## What The API Does
 
@@ -11,6 +11,8 @@ The broader category and KO-ingestion policy work is documented under [category_
 - Uses image OCR and a vision-first image classifier for `.jpg`, `.jpeg`, and `.png` uploads.
 - Uses optional audio transcription for `.mp3`, `.wav`, and `.m4a` uploads before agriculture and subtype classification.
 - Uses optional FFmpeg-based frame sampling and audio extraction for video uploads before agriculture and subtype classification.
+- Screens incoming files and submitted URLs with Agri Gate before downstream extraction or classification.
+- Uses PageSense to turn a public URL into raw readable text for the URL classification path.
 - Infers a high-level category (`Document`, `Dataset`, `Image`, `Audio`, or `Video`) for the supported file types.
 - Scores `Document` uploads against 11 consolidated document subcategories using measurable heuristic signals.
 - Scores `Dataset` uploads against 8 consolidated dataset subcategories using heuristic schema/content signals and an optional dataset-specific text LLM path.
@@ -137,7 +139,7 @@ Operational note:
 
 ### `POST /classify`
 
-Classifies a supported KO asset file.
+Classifies a supported KO asset file after Agri Gate security screening.
 
 Important runtime constraint:
 
@@ -159,10 +161,10 @@ Important runtime constraint:
   - `TABULAR_PREVIEW_ROWS=30`
   - `XLSX_MAX_SHEETS=10`
   - `XLSX_MAX_ROWS_PER_SHEET=25`
-- category inference currently routes delimited files to `Dataset` and routes document-family files to `Document`
-- category inference routes image files to `Image`
-- category inference routes audio files to `Audio`
-- category inference routes video files to `Video`
+- file MIME/type routing currently routes delimited files to `Dataset` and routes document-family files to `Document`
+- file MIME/type routing routes image files to `Image`
+- file MIME/type routing routes audio files to `Audio`
+- file MIME/type routing routes video files to `Video`
 - `Dataset` uploads now receive dataset subtype scoring
 - `Document` uploads receive document subtype scoring
 - `Image` uploads receive image subtype scoring
@@ -178,10 +180,12 @@ Deployment note:
 
 Query parameters:
 
+- `use_agri_gate`: if `true`, send the uploaded file to Agri Gate before classification; default `false`
 - `require_agriculture`: if `true`, non-agriculture documents return early and skip subcategory classification
 - `auto_route_models`: if `true`, the API decides when text and vision models are actually used
 - `use_vision`: allow InternVL-style vision classification when routing decides it is needed; default `true`
 - `use_text_llm`: allow text LLM classification for agriculture-related documents; default `true`
+- language-aware routing now detects probable text language and makes the text LLM the primary subtype classifier for strongly non-English content to avoid over-trusting English-biased heuristics
 - `heuristics_alpha`: heuristic weight used by weighted fusion
 - `classification_confidence_threshold`: confidence threshold used to treat a subcategory result as strong enough
 - `vision_trigger_threshold`: confidence threshold below which vision may be triggered
@@ -194,25 +198,65 @@ Query parameters:
 Example:
 
 ```bash
-curl -X POST "http://localhost:8011/classify?require_agriculture=true&auto_route_models=true&use_text_llm=true&use_vision=true&fusion_strategy=adaptive" \
+curl -X POST "http://localhost:8011/classify?use_agri_gate=false&require_agriculture=true&auto_route_models=true&use_text_llm=true&use_vision=true&fusion_strategy=adaptive" \
   -F "file=@document.docx"
 ```
 
 Representative response fields:
 
+- `processing_info.security_gate`: Agri Gate scan status, reason code, and strict-mode outcome
+- `processing_info.source_mode`: `file`
 - `best_match`: top candidate after heuristics-only scoring or fusion
 - `all_candidates`: full ranked list
 - `classification_skipped`: whether classification stopped after the agriculture gate
 - `skip_reason`: explanation when classification is intentionally skipped
-- `category_inference`: inferred high-level category, confidence, and rationale
+- `category_used`: deterministic category routing used for the uploaded file
 - `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results
 - `processing_info.routing`: whether text and vision were requested, used, and why
+- `processing_info.language_detection`: detected language, confidence, and whether non-English LLM-primary routing was applied
 - `processing_info.routing.audio_mode`: present for the audio branch
 - `processing_info.stage_timings_ms`: latency breakdown by extraction, OCR, agriculture, heuristics, LLM, and fusion stages
 - `feature_details`: feature-level evidence and excerpts
 - `rationale`: direct explanation for the candidate
 - `contrastive_rationale`: why the winner beat nearby alternatives
 - `fusion`: weights, agreement score, and fusion rationale
+
+### `POST /classify-url`
+
+Classifies a public URL after:
+
+1. Agri Gate URL screening
+2. local URL deny-list enforcement for dangerous direct-download targets
+3. PageSense raw-text extraction
+4. agriculture relevance, category inference, and text-based subtype classification
+
+Current URL behavior:
+
+- accepts only public `http` and `https` URLs
+- uses PageSense raw text only; it does not ingest downloaded file bytes in this service
+- stays text-only after extraction, so OCR and vision routing do not apply
+- `use_agri_gate`: if `true`, send the URL to Agri Gate before PageSense extraction; default `false`
+- can currently route URL content into `Document`, `Dataset`, or `Software Application`
+- returns category-level output for `Software Application` and skips subtype scoring for that category for now
+
+Example:
+
+```bash
+curl -X POST "http://localhost:8011/classify-url?use_agri_gate=false&require_agriculture=true&use_text_llm=true&fusion_strategy=adaptive" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.org/article"}'
+```
+
+Representative response fields:
+
+- `processing_info.security_gate`: Agri Gate scan status, reason code, and strict-mode outcome
+- `processing_info.source_mode`: `url`
+- `processing_info.extraction`: PageSense extraction metadata
+- `best_match`: top candidate after heuristics-only scoring or fusion
+- `classification_skipped`: whether the URL stopped at the agriculture gate or category gate
+- `category_used`: category selected for downstream URL classification
+- `category_inference`: inferred high-level category for the extracted URL text
+- `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results
 
 ## Recommended Fusion Defaults
 
@@ -252,6 +296,10 @@ The health payload now also exposes operational readiness for the newer media br
 
 - `models.audio_transcription.enabled`
 - `models.audio_transcription.configured`
+- `models.agrigate.configured`
+- `models.agrigate.url_strict`
+- `models.agrigate.file_strict`
+- `models.pagesense.configured`
 - `models.video_tooling.ffmpeg_available`
 - `models.video_tooling.ffprobe_available`
 - `models.video_tooling.frame_sampling_ready`
@@ -316,6 +364,24 @@ Add these variables only if vision classification should be enabled:
 VISION_LLM_BASE_URL=https://your-internvl-server.com/v1
 VISION_LLM_MODEL=internvl3-5-14b
 VISION_LLM_API_KEY=your-key
+```
+
+Add these variables if file and URL security screening should be enabled:
+
+```bash
+AGRI_GATE_BASE_URL=https://agrigate.nexavion.com
+AGRI_GATE_API_TOKEN=your-token
+AGRI_GATE_TIMEOUT=60
+AGRI_GATE_URL_STRICT=true
+AGRI_GATE_FILE_STRICT=true
+```
+
+Add these variables if URL extraction through PageSense should be enabled:
+
+```bash
+URL_CONTENT_EXTRACTOR_BASE=https://pagesense.nexavion.com
+EXTRACTOR_TIMEOUT=150
+EXTRACTOR_MIN_CHARS=100
 ```
 
 Start the service with one of:

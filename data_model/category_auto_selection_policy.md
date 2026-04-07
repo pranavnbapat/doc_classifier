@@ -4,6 +4,10 @@
 
 This document defines how `category` should be selected for uploaded Knowledge Objects before subcategory suggestion is performed.
 
+Upload-safety constraints for dangerous executable, installer, script, and archive payloads are documented separately in:
+
+- [upload_security_policy.md](./upload_security_policy.md)
+
 The policy is aligned with two KO ingestion modes:
 
 1. `file-based KO`
@@ -77,6 +81,7 @@ It does **not** safely support physical software delivery in the public file-upl
 Therefore:
 
 - `Software Application` should not appear when a file-based KO is being uploaded
+- executable, installer, and script payloads should also be blocked independently by upload-security rules
 
 ## 2. URL-based KO
 
@@ -101,6 +106,11 @@ A URL-based KO can point to:
 - a software tool, repository, product page, or application landing page
 
 This makes `Software Application` appropriate for URL-based KOs even when it is not allowed in file-based uploads.
+
+Important safety note:
+
+- URL-based `Software Application` should refer to software pages, repositories, documentation, or landing pages
+- it should not accept direct executable or installable binary URLs
 
 ---
 
