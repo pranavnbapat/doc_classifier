@@ -49,6 +49,7 @@ from docint.category.dataset_scorer import DATASET_SUBTYPES, score_dataset_subca
 from docint.category.image_scorer import score_image_subcategories_from_text, IMAGE_SUBTYPES
 from docint.category.video_scorer import VIDEO_SUBTYPES, score_video_subcategories
 from docint.ingest.dispatcher import ingest_asset, SUPPORTED_DOCUMENT_EXTENSIONS
+from docint.ingest.unit_limits import inspect_document_units
 from docint.video.extract import media_duration_seconds, sample_video_frames, transcribe_video_audio
 from docint.integrations.agrigate import scan_file as agrigate_scan_file, scan_url as agrigate_scan_url
 from docint.integrations.pagesense import extract_url_text
@@ -110,7 +111,9 @@ MAX_AUDIO_DURATION_SEC = int(os.getenv("MAX_AUDIO_DURATION_SEC", "3000"))
 MAX_VIDEO_DURATION_SEC = int(os.getenv("MAX_VIDEO_DURATION_SEC", "3000"))
 MAX_AUDIO_UPLOAD_SIZE_MB = int(os.getenv("MAX_AUDIO_UPLOAD_SIZE_MB", "768"))
 MAX_VIDEO_UPLOAD_SIZE_MB = int(os.getenv("MAX_VIDEO_UPLOAD_SIZE_MB", "1024"))
+MAX_OTHER_UPLOAD_SIZE_MB = int(os.getenv("MAX_OTHER_UPLOAD_SIZE_MB", "50"))
 MAX_REQUEST_BODY_MB = int(os.getenv("MAX_REQUEST_BODY_MB", str(max(MAX_AUDIO_UPLOAD_SIZE_MB, MAX_VIDEO_UPLOAD_SIZE_MB))))
+MAX_DOCUMENT_UNITS = int(os.getenv("MAX_DOCUMENT_UNITS", "100"))
 AGRI_GATE_BASE_URL = os.getenv("AGRI_GATE_BASE_URL", "").rstrip("/")
 AGRI_GATE_TIMEOUT = float(os.getenv("AGRI_GATE_TIMEOUT", "60"))
 AGRI_GATE_URL_STRICT = os.getenv("AGRI_GATE_URL_STRICT", "true").lower() == "true"
@@ -2634,6 +2637,7 @@ async def classify_endpoint(
     """Classify a supported KO asset file with optional model routing."""
     filename = file.filename or "unknown.pdf"
     suffix = os.path.splitext(filename)[1].lower()
+    document_suffixes = {".pdf", ".txt", ".docx", ".pptx"}
     audio_suffixes = {".mp3", ".wav", ".m4a"}
     video_suffixes = {".mp4", ".avi", ".mov", ".wmv", ".mpeg", ".mpg", ".mkv", ".flv", ".webm", ".3gp", ".mts", ".m2ts", ".vob", ".rmvb"}
     content_length = request.headers.get("content-length")
@@ -2683,12 +2687,28 @@ async def classify_endpoint(
             status_code=413,
             detail=f"Video file too large ({file_size_mb} MB). Maximum allowed is {MAX_VIDEO_UPLOAD_SIZE_MB} MB.",
         )
+    if suffix not in audio_suffixes | video_suffixes and file_size_bytes > MAX_OTHER_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({file_size_mb} MB). Maximum allowed is {MAX_OTHER_UPLOAD_SIZE_MB} MB for non-audio/video uploads.",
+        )
     
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
             tmp_path = tmp.name
             tmp.write(contents)
+
+        if suffix in document_suffixes:
+            unit_info = inspect_document_units(tmp_path, filename)
+            if unit_info.available and unit_info.units is not None and unit_info.units > MAX_DOCUMENT_UNITS:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"Document too large ({unit_info.units} {unit_info.unit_label}). "
+                        f"Maximum allowed is {MAX_DOCUMENT_UNITS} {unit_info.unit_label} for synchronous classification."
+                    ),
+                )
 
         agri_gate_payload = {
             "enabled": use_agri_gate,

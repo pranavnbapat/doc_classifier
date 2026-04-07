@@ -7,7 +7,7 @@ This service currently implements category and subtype classification for `.pdf`
 - [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md)
 - [subcategories_consolidation_analysis.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/subcategories_consolidation_analysis.md)
 
-The live API path in this repository accepts document-family, tabular, image, audio, and video uploads, plus public URLs. It now runs Agri Gate before downstream processing, infers a high-level category, and currently classifies:
+The live API path in this repository accepts document-family, tabular, image, audio, and video uploads, plus public URLs. It can run Agri Gate before downstream processing, uses deterministic MIME/file-type routing for files, keeps category inference for URLs, and currently classifies:
 
 - `Document` assets into 11 consolidated document subcategories
 - `Dataset` assets into 8 consolidated dataset subcategories
@@ -19,7 +19,7 @@ The live API path in this repository accepts document-family, tabular, image, au
 
 ```text
 Client file upload or URL submission
-  -> Agri Gate security screening
+  -> optional Agri Gate security screening
   -> FastAPI request handling
   -> normalized file ingestion or PageSense URL text extraction
   -> deterministic file MIME/type routing or URL category inference
@@ -46,11 +46,11 @@ Client file upload or URL submission
 - Authentication: Basic Auth when `DOCINT_AUTH_USERS` and `DOCINT_AUTH_PASSWORD` are configured
 - Exception: `GET /health` is intentionally unauthenticated so container and platform health probes can work without credentials
 
-The runtime now calls:
+The runtime can call:
 
 - [agrigate.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/integrations/agrigate.py)
 
-before file classification and before URL extraction. If strict mode is enabled and Agri Gate rejects the input, the request stops immediately.
+before file classification and before URL extraction when `use_agri_gate=true`. If strict mode is enabled and Agri Gate rejects the input, the request stops immediately.
 
 ### 2. Text Extraction
 
@@ -72,11 +72,11 @@ before file classification and before URL extraction. If strict mode is enabled 
 
 The service first normalizes supported document, tabular, image, audio, and video files into a common internal representation. OCR fallback is currently available for PDFs and images when extracted text quality is poor. CSV, TSV, and XLSX files are flattened into text summaries for agriculture gating and dataset classification. Audio files use optional transcription before agriculture gating and audio subtype scoring. Video files use optional audio extraction plus transcription and optional sampled-frame extraction through FFmpeg. URL submissions are sent to PageSense, which returns raw readable text only, so the URL branch is text-only after extraction.
 
-### 3. Category Inference
+### 3. Category Routing And URL Inference
 
 - Module: [infer.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/category/infer.py)
 
-The service infers a high-level category before document-subcategory scoring:
+For file uploads, the service uses deterministic MIME/file-type routing before subtype scoring:
 
 - `pdf`, `txt`, `docx`, `pptx` -> `Document`
 - `csv`, `tsv` -> `Dataset`
@@ -85,7 +85,7 @@ The service infers a high-level category before document-subcategory scoring:
 - `mp3`, `wav`, `m4a` -> `Audio`
 - common video formats such as `mp4`, `avi`, `mov`, `wmv`, `mpeg`, `mkv`, `webm` -> `Video`
 
-If the inferred category is `Dataset`, `Image`, `Audio`, or `Video`, the current `/classify` endpoint runs that category's subtype scoring path. If the inferred category is not currently supported for subtype scoring, the API returns category and agriculture results and skips subcategory classification.
+If the routed category is `Dataset`, `Image`, `Audio`, or `Video`, the current `/classify` endpoint runs that category's subtype scoring path. If the routed category is not currently supported for subtype scoring, the API returns category and agriculture results and skips subcategory classification.
 
 For `POST /classify-url`, category inference is text-based rather than extension-driven. The current URL branch can infer:
 

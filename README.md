@@ -1,6 +1,6 @@
 # KO Classifier API
 
-FastAPI service for explainable category and subcategory classification. The current runtime scope covers document-family, tabular, image, audio, and video uploads in `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`, plus public `http`/`https` URLs through a PageSense-backed text extraction path. Deterministic heuristics are always available, with optional text and vision LLM augmentation where the runtime path supports them. Agri Gate now screens both files and URLs before downstream classification.
+FastAPI service for explainable category and subcategory classification. The current runtime scope covers document-family, tabular, image, audio, and video uploads in `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`, plus public `http`/`https` URLs through a PageSense-backed text extraction path. Deterministic heuristics are always available, with optional text and vision LLM augmentation where the runtime path supports them. Agri Gate can be enabled per request for both files and URLs.
 
 The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`. The current `/classify` endpoint now uses deterministic MIME/file-type routing for `Document`, `Dataset`, `Image`, `Audio`, and `Video`, and routes each branch to its current subtype logic.
 
@@ -11,9 +11,9 @@ The broader category and KO-ingestion policy work is documented under [category_
 - Uses image OCR and a vision-first image classifier for `.jpg`, `.jpeg`, and `.png` uploads.
 - Uses optional audio transcription for `.mp3`, `.wav`, and `.m4a` uploads before agriculture and subtype classification.
 - Uses optional FFmpeg-based frame sampling and audio extraction for video uploads before agriculture and subtype classification.
-- Screens incoming files and submitted URLs with Agri Gate before downstream extraction or classification.
+- Can screen incoming files and submitted URLs with Agri Gate before downstream extraction or classification when `use_agri_gate=true`.
 - Uses PageSense to turn a public URL into raw readable text for the URL classification path.
-- Infers a high-level category (`Document`, `Dataset`, `Image`, `Audio`, or `Video`) for the supported file types.
+- Uses deterministic MIME/file-type routing for uploaded files and text-based category inference for URLs.
 - Scores `Document` uploads against 11 consolidated document subcategories using measurable heuristic signals.
 - Scores `Dataset` uploads against 8 consolidated dataset subcategories using heuristic schema/content signals and an optional dataset-specific text LLM path.
 - Scores `Image` uploads against 3 consolidated image subcategories using a vision-first classifier with OCR-backed fallback heuristics.
@@ -139,7 +139,7 @@ Operational note:
 
 ### `POST /classify`
 
-Classifies a supported KO asset file after Agri Gate security screening.
+Classifies a supported KO asset file. Agri Gate screening is optional and controlled by `use_agri_gate`.
 
 Important runtime constraint:
 
@@ -155,7 +155,11 @@ Important runtime constraint:
   - `MAX_VIDEO_DURATION_SEC=3000`
   - `MAX_AUDIO_UPLOAD_SIZE_MB=768`
   - `MAX_VIDEO_UPLOAD_SIZE_MB=1024`
+  - `MAX_OTHER_UPLOAD_SIZE_MB=50`
   - `MAX_REQUEST_BODY_MB=1024`
+- document-family uploads are rejected early when they exceed the synchronous unit cap:
+  - `MAX_DOCUMENT_UNITS=100`
+  - applies to exact PDF pages, exact PPTX slides, DOCX page count when Office metadata is available, and a conservative TXT page estimate
 - tabular ingestion uses bounded previews for speed:
   - `TABULAR_MAX_ROWS=100`
   - `TABULAR_PREVIEW_ROWS=30`
@@ -193,7 +197,7 @@ Query parameters:
 - `fusion_strategy`: `weighted`, `adaptive`, `agreement`, or `cascade`
 - `vision_max_pages`: maximum sampled pages passed to the vision model; runtime uses deterministic representative-page sampling rather than scanning every page
 - `ocr_lang`: optional Tesseract OCR language bundle, used only when PDF OCR fallback is triggered
-- `ocr_max_pages`: maximum pages sent through PDF OCR fallback
+- `ocr_max_pages`: maximum pages sent through OCR fallback; default `5`, maximum `50`
 
 Example:
 
@@ -225,7 +229,7 @@ Representative response fields:
 
 Classifies a public URL after:
 
-1. Agri Gate URL screening
+1. optional Agri Gate URL screening
 2. local URL deny-list enforcement for dangerous direct-download targets
 3. PageSense raw-text extraction
 4. agriculture relevance, category inference, and text-based subtype classification
