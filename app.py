@@ -15,6 +15,9 @@ import os
 import shutil
 import tempfile
 import re
+import time
+import hashlib
+import sys
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
@@ -57,6 +60,7 @@ from docint.features.sections import count_sections
 from docint.features.citations import detect_citations
 from docint.features.keywords import count_keywords
 from docint.domain.agriculture_pipeline import assess_agriculture_relevance_staged
+from docint.domain.ko_eligibility import assess_ko_eligibility
 from docint.rubrics.imrad import score_imrad
 from docint.rubrics.citations import score_citations
 from docint.rubrics.deliverable import score_deliverable
@@ -121,6 +125,13 @@ AGRI_GATE_FILE_STRICT = os.getenv("AGRI_GATE_FILE_STRICT", "true").lower() == "t
 URL_CONTENT_EXTRACTOR_BASE = os.getenv("URL_CONTENT_EXTRACTOR_BASE", "").rstrip("/")
 EXTRACTOR_TIMEOUT = float(os.getenv("EXTRACTOR_TIMEOUT", "60"))
 EXTRACTOR_MIN_CHARS = int(os.getenv("EXTRACTOR_MIN_CHARS", "100"))
+URL_EXTRACTION_CACHE_TTL_SEC = int(os.getenv("URL_EXTRACTION_CACHE_TTL_SEC", "172800"))
+AGRICULTURE_CACHE_TTL_SEC = int(os.getenv("AGRICULTURE_CACHE_TTL_SEC", "172800"))
+RUNTIME_CACHE_MAX_ENTRIES = int(os.getenv("RUNTIME_CACHE_MAX_ENTRIES", "256"))
+RUNTIME_CACHE_MAX_BYTES = int(os.getenv("RUNTIME_CACHE_MAX_BYTES", str(64 * 1024 * 1024)))
+TEXT_LLM_GAP_THRESHOLD = float(os.getenv("TEXT_LLM_GAP_THRESHOLD", "0.12"))
+URL_TEXT_LLM_MAX_CHARS = int(os.getenv("URL_TEXT_LLM_MAX_CHARS", "7000"))
+URL_DATASET_LLM_MAX_CHARS = int(os.getenv("URL_DATASET_LLM_MAX_CHARS", "6000"))
 
 # All EU languages for Tesseract OCR
 ALL_OCR_LANGS = "bul+ces+dan+deu+ell+eng+est+fin+fra+hrv+hun+ita+lav+lit+mlt+nld+pol+por+ron+slk+slv+spa+swe+gle"
@@ -146,6 +157,8 @@ if AUTH_USERS_STR and AUTH_PASSWORD:
 
 # Track if auth is enabled
 AUTH_ENABLED = bool(AUTHORIZED_USERS)
+PAGESENSE_CACHE: Dict[str, tuple[float, Any, int]] = {}
+AGRICULTURE_CACHE: Dict[str, tuple[float, Any, int]] = {}
 
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
@@ -546,8 +559,23 @@ def _should_run_text_llm(
     *,
     use_text_llm: bool,
     is_agriculture_related: bool,
+    best_candidate: Optional[SubcategoryCandidate] = None,
+    current_candidates: Optional[List[SubcategoryCandidate]] = None,
+    confidence_threshold: float = 0.35,
+    gap_threshold: float = TEXT_LLM_GAP_THRESHOLD,
+    non_english_llm_primary: bool = False,
 ) -> bool:
-    return use_text_llm and is_agriculture_related and LLM_CONFIGURED
+    if not (use_text_llm and is_agriculture_related and LLM_CONFIGURED):
+        return False
+    if non_english_llm_primary:
+        return True
+    if best_candidate is None:
+        return True
+    if best_candidate.confidence < confidence_threshold:
+        return True
+    if _top_probability_gap(current_candidates or []) < gap_threshold:
+        return True
+    return False
 
 
 def _should_run_vision(
@@ -593,6 +621,150 @@ def _masked_origin(url: str) -> Optional[str]:
         return None
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _cache_total_bytes(cache: Dict[str, tuple[float, Any, int]]) -> int:
+    return sum(item[2] for item in cache.values())
+
+
+def _estimate_cache_value_size(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, (int, float, bool)):
+        return sys.getsizeof(value)
+    if isinstance(value, dict):
+        return sum(_estimate_cache_value_size(k) + _estimate_cache_value_size(v) for k, v in value.items())
+    if isinstance(value, (list, tuple, set)):
+        return sum(_estimate_cache_value_size(item) for item in value)
+    if hasattr(value, "__dict__"):
+        return _estimate_cache_value_size(vars(value))
+    return sys.getsizeof(value)
+
+
+def _cache_get(cache: Dict[str, tuple[float, Any, int]], key: str) -> Any | None:
+    entry = cache.get(key)
+    if not entry:
+        return None
+    expires_at, value, _ = entry
+    if expires_at < time.time():
+        cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(cache: Dict[str, tuple[float, Any, int]], key: str, value: Any, ttl_seconds: int) -> None:
+    if ttl_seconds <= 0:
+        return
+    now = time.time()
+    expired_keys = [cache_key for cache_key, (expires_at, _, _) in cache.items() if expires_at < now]
+    for expired_key in expired_keys:
+        cache.pop(expired_key, None)
+
+    estimated_size = _estimate_cache_value_size(value)
+    if estimated_size > RUNTIME_CACHE_MAX_BYTES:
+        return
+
+    cache.pop(key, None)
+    cache[key] = (now + ttl_seconds, value, estimated_size)
+
+    while len(cache) > RUNTIME_CACHE_MAX_ENTRIES or _cache_total_bytes(cache) > RUNTIME_CACHE_MAX_BYTES:
+        oldest_key = next(iter(cache), None)
+        if oldest_key is None:
+            break
+        cache.pop(oldest_key, None)
+
+
+def _sample_text_for_llm(text: str, *, max_chars: int) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= max_chars:
+        return compact
+    head_len = int(max_chars * 0.45)
+    mid_len = int(max_chars * 0.25)
+    tail_len = max_chars - head_len - mid_len - 64
+    midpoint = len(compact) // 2
+    mid_start = max(0, midpoint - (mid_len // 2))
+    mid_end = min(len(compact), mid_start + mid_len)
+    parts = [
+        compact[:head_len].strip(),
+        compact[mid_start:mid_end].strip(),
+        compact[-tail_len:].strip() if tail_len > 0 else "",
+    ]
+    return "\n\n[...]\n\n".join([part for part in parts if part])
+
+
+def _agriculture_cache_key(text: str, *, allow_llm_fallback: bool) -> str:
+    normalized = " ".join((text or "").split())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"{digest}|llm={int(bool(allow_llm_fallback and LLM_CONFIGURED))}|model={LLM_MODEL}"
+
+
+def _assess_agriculture_cached(
+    *,
+    text: str,
+    lines: List[str],
+    allow_llm_fallback: bool,
+):
+    cache_key = _agriculture_cache_key(text, allow_llm_fallback=allow_llm_fallback)
+    cached = _cache_get(AGRICULTURE_CACHE, cache_key)
+    if cached is not None:
+        return cached, True
+
+    result = assess_agriculture_relevance_staged(
+        text,
+        lines=lines,
+        allow_llm_fallback=allow_llm_fallback,
+        llm_config={
+            "base_url": LLM_BASE_URL,
+            "api_key": LLM_API_KEY,
+            "model": LLM_MODEL,
+        } if allow_llm_fallback and LLM_CONFIGURED else None,
+    )
+    _cache_set(AGRICULTURE_CACHE, cache_key, result, AGRICULTURE_CACHE_TTL_SEC)
+    return result, False
+
+
+def _assess_ko_eligibility(
+    *,
+    text: str,
+    use_text_llm: bool,
+) -> Dict[str, Any]:
+    heuristic = assess_ko_eligibility(text)
+    result = {
+        "is_eligible": heuristic.is_eligible,
+        "confidence": round(heuristic.confidence, 4),
+        "exclusion_type": heuristic.exclusion_type,
+        "rationale": heuristic.rationale,
+        "matched_signals": heuristic.matched_signals,
+        "method": heuristic.method,
+    }
+
+    ambiguous = (not heuristic.is_eligible and heuristic.confidence < 0.8) or (heuristic.is_eligible and heuristic.confidence < 0.6)
+    if ambiguous and use_text_llm and LLM_CONFIGURED:
+        try:
+            from docint.llm.eligibility_classify import llm_classify_ko_eligibility_text
+
+            llm_res = llm_classify_ko_eligibility_text(
+                text,
+                base_url=LLM_BASE_URL,
+                api_key=LLM_API_KEY,
+                model=LLM_MODEL,
+            )
+            result = {
+                "is_eligible": llm_res.is_eligible,
+                "confidence": round(llm_res.confidence, 4),
+                "exclusion_type": llm_res.exclusion_type,
+                "rationale": llm_res.rationale,
+                "matched_signals": list(llm_res.raw_json.get("matched_signals", []) or []),
+                "method": "llm_eligibility_fallback",
+            }
+        except Exception as exc:
+            result["llm_error"] = str(exc)
+
+    return result
 
 
 def _validate_public_http_url(url: str) -> str:
@@ -715,8 +887,6 @@ def classify_url_text(
     classification_confidence_threshold: float = 0.35,
     fusion_strategy: str = "adaptive",
 ) -> ClassificationResponse:
-    import time
-
     start_time = time.time()
     stage_timings_ms: Dict[str, float] = {}
     text = extracted_text.strip()
@@ -738,15 +908,10 @@ def classify_url_text(
     stage_timings_ms["category_inference_ms"] = round((time.time() - stage_start) * 1000, 2)
 
     stage_start = time.time()
-    agri_relevance = assess_agriculture_relevance_staged(
-        text,
+    agri_relevance, agriculture_cache_hit = _assess_agriculture_cached(
+        text=text,
         lines=lines,
         allow_llm_fallback=use_text_llm and LLM_CONFIGURED,
-        llm_config={
-            "base_url": LLM_BASE_URL,
-            "api_key": LLM_API_KEY,
-            "model": LLM_MODEL,
-        } if use_text_llm and LLM_CONFIGURED else None,
     )
     stage_timings_ms["agriculture_pipeline_ms"] = round((time.time() - stage_start) * 1000, 2)
     agriculture_response = AgricultureRelevance(
@@ -774,6 +939,46 @@ def classify_url_text(
             for item in agri_relevance.stage_results
         ],
     )
+
+    stage_start = time.time()
+    eligibility_result = _assess_ko_eligibility(text=text, use_text_llm=use_text_llm)
+    stage_timings_ms["ko_eligibility_ms"] = round((time.time() - stage_start) * 1000, 2)
+    if agri_relevance.is_agriculture_related and not eligibility_result["is_eligible"]:
+        processing_time_ms = (time.time() - start_time) * 1000
+        exclusion_label = (eligibility_result.get("exclusion_type") or "ineligible_content").replace("_", " ")
+        return ClassificationResponse(
+            best_match=None,
+            all_candidates=[],
+            fusion=None,
+            heuristics=None,
+            vision_llm=None,
+            text_llm=None,
+            category_used=category_result.category,
+            category_inference=category_response,
+            agriculture_relevance=agriculture_response,
+            classification_skipped=True,
+            skip_reason=f"Agriculture-related but not an eligible knowledge object: {exclusion_label}",
+            total_candidates=0,
+            confidence_threshold_met=False,
+            document_info=base_document_info,
+            processing_info={
+                "processing_time_ms": round(processing_time_ms, 2),
+                "ocr_used": False,
+                "sources_used": [],
+                "fusion_enabled": False,
+                "require_agriculture": require_agriculture,
+                "auto_route_models": auto_route_models,
+                "source_mode": "url",
+                "extraction": pagesense_meta,
+                "eligibility_gate": eligibility_result,
+                "cache": {
+                    "pagesense": pagesense_meta.get("cache_hit", False),
+                    "agriculture": agriculture_cache_hit,
+                },
+                "language_detection": language_info,
+                "stage_timings_ms": stage_timings_ms,
+            },
+        )
 
     base_document_info = {
         "filename": url,
@@ -818,6 +1023,50 @@ def classify_url_text(
                 "auto_route_models": auto_route_models,
                 "source_mode": "url",
                 "extraction": pagesense_meta,
+                "cache": {
+                    "pagesense": pagesense_meta.get("cache_hit", False),
+                    "agriculture": agriculture_cache_hit,
+                },
+                "language_detection": language_info,
+                "stage_timings_ms": stage_timings_ms,
+            },
+        )
+
+    stage_start = time.time()
+    eligibility_result = _assess_ko_eligibility(text=text, use_text_llm=use_text_llm)
+    stage_timings_ms["ko_eligibility_ms"] = round((time.time() - stage_start) * 1000, 2)
+    if not eligibility_result["is_eligible"]:
+        processing_time_ms = (time.time() - start_time) * 1000
+        exclusion_label = (eligibility_result.get("exclusion_type") or "ineligible_content").replace("_", " ")
+        return ClassificationResponse(
+            best_match=None,
+            all_candidates=[],
+            fusion=None,
+            heuristics=None,
+            vision_llm=None,
+            text_llm=None,
+            category_used=category_result.category,
+            category_inference=category_response,
+            agriculture_relevance=agriculture_response,
+            classification_skipped=True,
+            skip_reason=f"Agriculture-related but not an eligible knowledge object: {exclusion_label}",
+            total_candidates=0,
+            confidence_threshold_met=False,
+            document_info=base_document_info,
+            processing_info={
+                "processing_time_ms": round(processing_time_ms, 2),
+                "ocr_used": False,
+                "sources_used": [],
+                "fusion_enabled": False,
+                "require_agriculture": require_agriculture,
+                "auto_route_models": auto_route_models,
+                "source_mode": "url",
+                "extraction": pagesense_meta,
+                "cache": {
+                    "pagesense": pagesense_meta.get("cache_hit", False),
+                    "agriculture": agriculture_cache_hit,
+                },
+                "eligibility_gate": eligibility_result,
                 "language_detection": language_info,
                 "stage_timings_ms": stage_timings_ms,
             },
@@ -849,6 +1098,11 @@ def classify_url_text(
                 "auto_route_models": auto_route_models,
                 "source_mode": "url",
                 "extraction": pagesense_meta,
+                "cache": {
+                    "pagesense": pagesense_meta.get("cache_hit", False),
+                    "agriculture": agriculture_cache_hit,
+                },
+                "eligibility_gate": eligibility_result,
                 "language_detection": language_info,
                 "stage_timings_ms": stage_timings_ms,
             },
@@ -866,17 +1120,28 @@ def classify_url_text(
         dataset_text_source = None
         dataset_fusion = None
 
-        if use_text_llm and LLM_CONFIGURED:
+        should_use_dataset_text_llm = (
+            use_text_llm
+            and LLM_CONFIGURED
+            and (
+                non_english_llm_primary
+                or dataset_best is None
+                or dataset_best.confidence < classification_confidence_threshold
+                or _top_probability_gap(dataset_candidates) < TEXT_LLM_GAP_THRESHOLD
+            )
+        )
+
+        if should_use_dataset_text_llm:
             stage_start = time.time()
             try:
                 from docint.llm.subcategory_classify import llm_classify_dataset_subcategories_text
 
                 llm_res = llm_classify_dataset_subcategories_text(
-                    text,
+                    _sample_text_for_llm(text, max_chars=URL_DATASET_LLM_MAX_CHARS),
                     base_url=LLM_BASE_URL,
                     api_key=LLM_API_KEY,
                     model=LLM_MODEL,
-                    max_chars=12000,
+                    max_chars=URL_DATASET_LLM_MAX_CHARS,
                     temperature=0.2,
                 )
                 dataset_text_source = convert_to_source_result(
@@ -968,12 +1233,17 @@ def classify_url_text(
                 "source_mode": "url",
                 "routing": {
                     "dataset_mode": True,
-                    "text_llm": {"requested": use_text_llm, "used": dataset_text_result is not None and "error" not in dataset_text_result, "reason": "dataset_text_llm_enabled" if use_text_llm else "disabled"},
+                    "text_llm": {"requested": use_text_llm, "used": dataset_text_result is not None and "error" not in dataset_text_result, "reason": "dataset_text_llm_enabled" if should_use_dataset_text_llm else "heuristics_strong_enough"},
                     "vision_llm": {"requested": False, "used": False, "reasons": ["url_text_mode_no_vision"]},
                     "language_detection": language_info,
                 },
                 "classification_confidence_threshold": classification_confidence_threshold,
                 "extraction": pagesense_meta,
+                "cache": {
+                    "pagesense": pagesense_meta.get("cache_hit", False),
+                    "agriculture": agriculture_cache_hit,
+                },
+                "eligibility_gate": eligibility_result,
                 "stage_timings_ms": stage_timings_ms,
             },
         )
@@ -1027,17 +1297,35 @@ def classify_url_text(
 
     text_source = None
     llm_results: Dict[str, Any] = {}
-    if use_text_llm and LLM_CONFIGURED:
+    should_use_text_llm = _should_run_text_llm(
+        use_text_llm=use_text_llm,
+        is_agriculture_related=agri_relevance.is_agriculture_related,
+        best_candidate=best_candidate,
+        current_candidates=final_candidates,
+        confidence_threshold=classification_confidence_threshold,
+        gap_threshold=TEXT_LLM_GAP_THRESHOLD,
+        non_english_llm_primary=non_english_llm_primary,
+    ) if auto_route_models else (use_text_llm and LLM_CONFIGURED)
+    text_llm_reason = (
+        "non_english_text_llm_primary"
+        if non_english_llm_primary and should_use_text_llm
+        else (
+            "low_confidence_or_close_candidates"
+            if should_use_text_llm and auto_route_models
+            else ("manual_request" if should_use_text_llm else "heuristics_strong_enough")
+        )
+    )
+    if should_use_text_llm:
         stage_start = time.time()
         try:
             from docint.llm.subcategory_classify import llm_classify_subcategories_text
 
             llm_res = llm_classify_subcategories_text(
-                text,
+                _sample_text_for_llm(text, max_chars=URL_TEXT_LLM_MAX_CHARS),
                 base_url=LLM_BASE_URL,
                 api_key=LLM_API_KEY,
                 model=LLM_MODEL,
-                max_chars=15000,
+                max_chars=URL_TEXT_LLM_MAX_CHARS,
                 temperature=0.2,
             )
             text_source = convert_to_source_result(
@@ -1124,12 +1412,17 @@ def classify_url_text(
             "auto_route_models": auto_route_models,
             "source_mode": "url",
             "routing": {
-                "text_llm": {"requested": use_text_llm, "used": bool(text_source), "reason": "url_text_default_text_stage" if use_text_llm else "disabled"},
+                "text_llm": {"requested": use_text_llm, "used": bool(text_source), "reason": text_llm_reason},
                 "vision_llm": {"requested": False, "used": False, "reasons": ["url_text_mode_no_vision"]},
                 "language_detection": language_info,
             },
             "classification_confidence_threshold": classification_confidence_threshold,
             "extraction": pagesense_meta,
+            "cache": {
+                "pagesense": pagesense_meta.get("cache_hit", False),
+                "agriculture": agriculture_cache_hit,
+            },
+            "eligibility_gate": eligibility_result,
             "stage_timings_ms": stage_timings_ms,
         },
     )
@@ -1272,15 +1565,10 @@ def classify_document(
     
     # 3) Agriculture gate before the heavier classification pipeline
     stage_start = time.time()
-    agri_relevance = assess_agriculture_relevance_staged(
-        asset.text,
+    agri_relevance, agriculture_cache_hit = _assess_agriculture_cached(
+        text=asset.text,
         lines=asset.lines,
         allow_llm_fallback=use_text_llm and LLM_CONFIGURED,
-        llm_config={
-            "base_url": LLM_BASE_URL,
-            "api_key": LLM_API_KEY,
-            "model": LLM_MODEL,
-        } if use_text_llm and LLM_CONFIGURED else None,
     )
     stage_timings_ms["agriculture_pipeline_ms"] = round((time.time() - stage_start) * 1000, 2)
     agriculture_response = AgricultureRelevance(
@@ -2255,11 +2543,20 @@ def classify_document(
     should_use_text_llm = _should_run_text_llm(
         use_text_llm=use_text_llm,
         is_agriculture_related=agri_relevance.is_agriculture_related,
+        best_candidate=best_candidate,
+        current_candidates=final_candidates,
+        confidence_threshold=classification_confidence_threshold,
+        gap_threshold=TEXT_LLM_GAP_THRESHOLD,
+        non_english_llm_primary=non_english_llm_primary,
     ) if auto_route_models else (use_text_llm and LLM_CONFIGURED)
     routing_info["text_llm"]["reason"] = (
-        "agriculture_related_default_text_stage"
-        if should_use_text_llm and auto_route_models
-        else ("manual_request" if should_use_text_llm else "disabled_or_not_configured")
+        "non_english_text_llm_primary"
+        if non_english_llm_primary and should_use_text_llm
+        else (
+            "low_confidence_or_close_candidates"
+            if should_use_text_llm and auto_route_models
+            else ("manual_request" if should_use_text_llm else "heuristics_strong_enough")
+        )
     )
 
     if should_use_text_llm:
@@ -2456,6 +2753,9 @@ def classify_document(
             "auto_route_models": auto_route_models,
             "routing": routing_info,
             "language_detection": language_info,
+            "cache": {
+                "agriculture": agriculture_cache_hit,
+            },
             "classification_confidence_threshold": classification_confidence_threshold,
             "vision_trigger_threshold": vision_trigger_threshold,
             "candidate_gap_threshold": candidate_gap_threshold,
@@ -2784,6 +3084,7 @@ async def classify_url_endpoint(
     fusion_strategy: str = Query("adaptive", description="Fusion strategy: weighted, adaptive, agreement, cascade"),
 ):
     """Classify a public URL after Agri Gate screening and PageSense extraction."""
+    endpoint_stage_timings_ms: Dict[str, float] = {}
     url = _validate_public_http_url(body.url)
 
     agri_gate_payload = {
@@ -2793,11 +3094,13 @@ async def classify_url_endpoint(
         "skipped": not use_agri_gate,
     }
     if use_agri_gate:
+        stage_start = time.time()
         agri_gate_payload = _agri_gate_or_raise(
             agrigate_scan_url(url),
             strict=AGRI_GATE_URL_STRICT,
             source_label="url",
         )
+        endpoint_stage_timings_ms["agri_gate_ms"] = round((time.time() - stage_start) * 1000, 2)
 
     blocked_url_suffix = get_blocked_url_suffix(url)
     if blocked_url_suffix:
@@ -2812,13 +3115,48 @@ async def classify_url_endpoint(
             detail=f"Archive URL target '{archive_url_suffix}' is not allowed in the current URL flow.",
         )
 
-    pagesense_result = extract_url_text(url)
+    stage_start = time.time()
+    pagesense_cache_key = url.strip()
+    pagesense_result = _cache_get(PAGESENSE_CACHE, pagesense_cache_key)
+    pagesense_cache_hit = pagesense_result is not None
+    if pagesense_result is None:
+        pagesense_result = extract_url_text(url)
+        if pagesense_result.ok:
+            _cache_set(PAGESENSE_CACHE, pagesense_cache_key, pagesense_result, URL_EXTRACTION_CACHE_TTL_SEC)
+    endpoint_stage_timings_ms["pagesense_ms"] = round((time.time() - stage_start) * 1000, 2)
     if not pagesense_result.ok:
         raise HTTPException(status_code=422, detail=pagesense_result.rationale)
     if len(pagesense_result.text) < EXTRACTOR_MIN_CHARS:
         raise HTTPException(
             status_code=422,
             detail=f"PageSense extracted too little usable text ({len(pagesense_result.text)} chars). Minimum required is {EXTRACTOR_MIN_CHARS}.",
+        )
+
+    if pagesense_result.content_kind in {"document", "pdf"} and pagesense_result.page_count and pagesense_result.page_count > MAX_DOCUMENT_UNITS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"URL document too large ({pagesense_result.page_count} pages). "
+                f"Maximum allowed is {MAX_DOCUMENT_UNITS} pages for synchronous classification."
+            ),
+        )
+
+    if pagesense_result.content_kind in {"audio", "video"} and pagesense_result.duration_seconds and pagesense_result.duration_seconds > MAX_VIDEO_DURATION_SEC:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"URL media duration too long ({round(pagesense_result.duration_seconds, 1)} seconds). "
+                f"Maximum allowed is {MAX_VIDEO_DURATION_SEC} seconds."
+            ),
+        )
+
+    if pagesense_result.content_kind not in {"audio", "video"} and pagesense_result.size_bytes and pagesense_result.size_bytes > MAX_OTHER_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"URL content too large ({round(pagesense_result.size_bytes / (1024 * 1024), 2)} MB). "
+                f"Maximum allowed is {MAX_OTHER_UPLOAD_SIZE_MB} MB for non-audio/video URL content."
+            ),
         )
 
     result = classify_url_text(
@@ -2828,9 +3166,15 @@ async def classify_url_endpoint(
         pagesense_meta={
             "service": "pagesense",
             "base_url": _masked_origin(URL_CONTENT_EXTRACTOR_BASE),
+            "cache_hit": pagesense_cache_hit,
             "rationale": pagesense_result.rationale,
             "text_length": len(pagesense_result.text),
             "title": pagesense_result.title,
+            "content_kind": pagesense_result.content_kind,
+            "content_type": pagesense_result.content_type,
+            "size_bytes": pagesense_result.size_bytes,
+            "page_count": pagesense_result.page_count,
+            "duration_seconds": pagesense_result.duration_seconds,
         },
         require_agriculture=require_agriculture,
         auto_route_models=auto_route_models,
@@ -2839,6 +3183,7 @@ async def classify_url_endpoint(
         classification_confidence_threshold=classification_confidence_threshold,
         fusion_strategy=fusion_strategy,
     )
+    result.processing_info.setdefault("stage_timings_ms", {}).update(endpoint_stage_timings_ms)
     result.processing_info["security_gate"] = agri_gate_payload
     result.processing_info["source_mode"] = "url"
     return result

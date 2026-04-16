@@ -7,6 +7,9 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
+ARG TORCH_VERSION=2.11.0
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+
 # Install build dependencies (only needed for building wheels)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
@@ -16,7 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements and install into system site-packages (/usr/local)
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    grep -v '^torch==' requirements.txt > requirements.notorch.txt \
+    && python -m pip install -r requirements.notorch.txt \
+    && python -m pip install --index-url ${TORCH_INDEX_URL} torch==${TORCH_VERSION}
 
 
 # -------------------------
@@ -27,6 +33,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 ARG AGRI_EMBEDDING_MODEL=intfloat/multilingual-e5-small
+ARG PRELOAD_AGRI_MODEL=false
+ARG TORCH_VERSION=2.11.0
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 # Install runtime OS dependencies (PDF + OCR)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -39,13 +48,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV AGRI_EMBEDDING_MODEL=${AGRI_EMBEDDING_MODEL}
 ENV HF_HOME=/app/.cache/huggingface
 ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Copy installed Python deps from builder (system-wide)
 COPY --from=builder /usr/local /usr/local
 
 # Pre-download the agriculture embedding model so first inference is warm.
-RUN mkdir -p /app/.cache/huggingface \
-    && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${AGRI_EMBEDDING_MODEL}', device='cpu')"
+RUN --mount=type=cache,target=/app/.cache/huggingface \
+    mkdir -p /app/.cache/huggingface \
+    && if [ "${PRELOAD_AGRI_MODEL}" = "true" ]; then \
+        python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${AGRI_EMBEDDING_MODEL}', device='cpu')"; \
+       else \
+        echo 'Skipping agriculture embedding predownload'; \
+       fi
 
 # Copy application code
 COPY app.py .

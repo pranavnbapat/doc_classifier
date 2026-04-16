@@ -4,7 +4,10 @@ import importlib.util
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import numpy as np
 
 from docint.domain.agriculture import assess_agriculture_relevance
 
@@ -42,6 +45,15 @@ AGRI_ENABLE_LLM_FALLBACK = os.getenv("AGRI_ENABLE_LLM_FALLBACK", "true").strip()
 EMBEDDING_TEXT_LIMIT = int(os.getenv("AGRI_EMBEDDING_TEXT_LIMIT", "3500"))
 EMBEDDING_OVERRIDE_THRESHOLD = float(os.getenv("AGRI_EMBEDDING_OVERRIDE_THRESHOLD", "0.74"))
 EMBEDDING_BLEND_WEIGHT = float(os.getenv("AGRI_EMBEDDING_BLEND_WEIGHT", "0.45"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GENERATED_DIR = REPO_ROOT / "data_model" / "generated"
+BUCKET_CENTROID_PATH = GENERATED_DIR / "agriculture_bucket_centroids.npz"
+BUCKET_CENTROID_META_PATH = GENERATED_DIR / "agriculture_bucket_centroids.meta.json"
+NON_AGRICULTURE_PROTOTYPES = [
+    "query: generic software products corporate administration mobile applications SaaS tooling account management and login workflows",
+    "query: urban mobility finance legal compliance media entertainment consumer marketing and generic web publishing",
+    "query: pure computing infrastructure general chemistry physics mathematics and unrelated industrial operations",
+]
 
 
 def _embedding_available() -> bool:
@@ -60,6 +72,25 @@ def _truncate_text(text: str) -> str:
     return compact[:EMBEDDING_TEXT_LIMIT]
 
 
+@lru_cache(maxsize=1)
+def _load_bucket_centroids() -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    if not BUCKET_CENTROID_PATH.exists():
+        return {}, {}
+
+    arrs = np.load(BUCKET_CENTROID_PATH)
+    centroids: Dict[str, np.ndarray] = {}
+    for key in arrs.files:
+        if key.startswith("bucket::"):
+            centroids[key.removeprefix("bucket::")] = arrs[key]
+
+    meta: Dict[str, Any] = {}
+    if BUCKET_CENTROID_META_PATH.exists():
+        import json
+
+        meta = json.loads(BUCKET_CENTROID_META_PATH.read_text(encoding="utf-8"))
+    return centroids, meta
+
+
 def _embedding_stage(text: str) -> AgricultureStageResult:
     if not _embedding_available():
         return AgricultureStageResult(
@@ -74,25 +105,40 @@ def _embedding_stage(text: str) -> AgricultureStageResult:
 
     try:
         model = _load_embedding_model()
-        prototypes = {
-            "agriculture": [
-                "query: agriculture farming crops livestock manure fertiliser soil irrigation nutrient recovery food systems",
-                "query: agricultural production farm sustainability agronomy field trials fertilisers digestate biostimulants",
-                "query: landbouw landbouwsystemen mest gewas bodem irrigatie landbouwproductie",
-                "query: agriculture cultures elevage fumier sol irrigation engrais securite alimentaire",
-                "query: georgia ktinotrophia lipasmata edafos ardrefsi agrodiatrofiko systima",
-            ],
-            "non_agriculture": [
-                "query: generic industrial process software systems finance law media urban mobility pure water science",
-                "query: general information technology unrelated industrial operations and generic scientific computing",
-                "query: legal administration urban policy generic communication and corporate information",
-            ],
-        }
-
         text_for_embedding = _truncate_text(text)
         doc_emb = model.encode([f"query: {text_for_embedding}"], normalize_embeddings=True)
-        agri_embs = model.encode(prototypes["agriculture"], normalize_embeddings=True)
-        non_embs = model.encode(prototypes["non_agriculture"], normalize_embeddings=True)
+        bucket_centroids, bucket_meta = _load_bucket_centroids()
+        use_bucket_centroids = bool(bucket_centroids)
+        bucket_scores: Dict[str, float] = {}
+
+        if use_bucket_centroids:
+            bucket_scores = {
+                bucket: float((doc_emb @ centroid.reshape(-1, 1))[0][0])
+                for bucket, centroid in bucket_centroids.items()
+                if bucket != "__all__"
+            }
+            max_bucket_score = float(max(bucket_scores.values())) if bucket_scores else 0.0
+            global_centroid = bucket_centroids.get("__all__")
+            global_score = (
+                float((doc_emb @ global_centroid.reshape(-1, 1))[0][0])
+                if global_centroid is not None
+                else 0.0
+            )
+            agri_score = max(max_bucket_score, global_score)
+        else:
+            prototypes = {
+                "agriculture": [
+                    "query: agriculture farming crops livestock manure fertiliser soil irrigation nutrient recovery food systems",
+                    "query: agricultural production farm sustainability agronomy field trials fertilisers digestate biostimulants pollination beekeeping pesticide crop protection",
+                    "query: landbouw landbouwsystemen mest gewas bodem irrigatie landbouwproductie bestuiving bijenteelt pesticiden",
+                    "query: agriculture cultures elevage fumier sol irrigation engrais pollinisation apiculture pesticide",
+                    "query: georgia ktinotrophia lipasmata edafos ardrefsi agrodiatrofiko systima melissokomia epikoniasi",
+                ],
+            }
+            agri_embs = model.encode(prototypes["agriculture"], normalize_embeddings=True)
+            agri_score = float(max((doc_emb @ agri_embs.T)[0]))
+
+        non_embs = model.encode(NON_AGRICULTURE_PROTOTYPES, normalize_embeddings=True)
     except Exception as exc:
         return AgricultureStageResult(
             stage="embedding",
@@ -104,7 +150,6 @@ def _embedding_stage(text: str) -> AgricultureStageResult:
             details={"model": AGRI_EMBEDDING_MODEL},
         )
 
-    agri_score = float(max((doc_emb @ agri_embs.T)[0]))
     non_score = float(max((doc_emb @ non_embs.T)[0]))
     margin = agri_score - non_score
     confidence = max(0.0, min(1.0, 0.5 + (margin * 1.75)))
@@ -119,10 +164,13 @@ def _embedding_stage(text: str) -> AgricultureStageResult:
         rationale=f"Embedding similarity agriculture={agri_score:.3f}, non_agriculture={non_score:.3f}",
         details={
             "model": AGRI_EMBEDDING_MODEL,
+            "mode": "bucket_centroids" if use_bucket_centroids else "prototype_queries",
             "text_chars_used": min(len(text_for_embedding), EMBEDDING_TEXT_LIMIT),
             "agriculture_similarity": round(agri_score, 4),
             "non_agriculture_similarity": round(non_score, 4),
             "margin": round(margin, 4),
+            "bucket_similarities": {k: round(v, 4) for k, v in sorted(bucket_scores.items(), key=lambda item: item[1], reverse=True)[:5]},
+            "bucket_meta": bucket_meta if use_bucket_centroids else {},
         },
     )
 
@@ -163,8 +211,10 @@ def assess_agriculture_relevance_staged(
     final_method = lex.method
     final_rationale = lex.rationale
 
+    substantive_text = len((text or "").split()) >= 80 or len(text or "") >= 600
     ambiguous = 0.2 <= lex.score <= 0.75
-    if ambiguous and AGRI_ENABLE_EMBEDDING:
+    should_try_embedding = AGRI_ENABLE_EMBEDDING and (ambiguous or (lex.score < 0.2 and substantive_text))
+    if should_try_embedding:
         emb = _embedding_stage(text)
         stage_results.append(emb)
         if emb.used:
@@ -200,7 +250,7 @@ def assess_agriculture_relevance_staged(
                 )
             )
 
-    still_ambiguous = 0.3 <= final_confidence <= 0.7
+    still_ambiguous = 0.3 <= final_confidence <= 0.7 or (final_confidence < 0.3 and substantive_text)
     if still_ambiguous and allow_llm_fallback and AGRI_ENABLE_LLM_FALLBACK and llm_config:
         try:
             from docint.llm.agriculture_classify import llm_classify_agriculture_text

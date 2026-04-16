@@ -108,8 +108,18 @@ The API now also returns an `agriculture_relevance` block for each classified as
 The current design is staged:
 
 - Stage 1: AGROVOC-style multilingual lexicon matcher backed by [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon.json)
-- Stage 2: small local multilingual embedding model for ambiguous cases
+- Stage 2: small local multilingual embedding model for ambiguous cases, preferably driven by generated agriculture bucket centroids under [data_model/generated](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/generated)
 - Stage 3: optional text LLM fallback only when the earlier stages remain uncertain
+
+Eligibility note:
+
+- after agriculture relevance, the runtime now applies a KO-eligibility gate
+- this catches agriculture-related but non-eligible content such as:
+  - job vacancies / PhD positions
+  - call-for-applications style notices
+  - event announcements
+  - tender / procurement notices
+- the gate uses high-precision heuristics first and can fall back to the text LLM for ambiguous cases
 
 Default behavior:
 
@@ -134,6 +144,49 @@ Relevant settings:
 Operational note:
 
 - Stage 2 stays fail-safe. If the embedding dependency or local model is unavailable, the API falls back to the Stage 1 lexicon result and records that in `agriculture_relevance.stage_results`.
+
+Resource-generation note:
+
+- The repo now includes a reproducible agriculture-anchor pipeline:
+  - [scripts/build_agriculture_anchor_texts.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_anchor_texts.py) builds bootstrap anchor texts from the runtime lexicon
+  - [scripts/build_agrovoc_anchor_texts.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_anchor_texts.py) can fetch richer multilingual anchor texts from AGROVOC via SPARQL
+  - [scripts/build_agrovoc_full_export.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_full_export.py) exports the broad AGROVOC concept store
+  - [scripts/build_agriculture_lexicon_from_agrovoc.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_lexicon_from_agrovoc.py) converts that full export into the conservative runtime lexical trigger set using [agriculture_lexicon_overrides.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon_overrides.json) and [agriculture_lexicon_blocklist.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon_blocklist.json)
+  - [scripts/compute_agriculture_bucket_centroids.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/compute_agriculture_bucket_centroids.py) turns anchor JSONL files into per-bucket centroid resources for Stage 2
+- Local bootstrap commands:
+
+```bash
+.venv/bin/python scripts/build_agriculture_anchor_texts.py
+.venv/bin/python scripts/compute_agriculture_bucket_centroids.py \
+  --inputs data_model/generated/agriculture_anchor_texts.jsonl
+```
+
+- Full AGROVOC regeneration workflow:
+
+```bash
+.venv/bin/python scripts/build_agrovoc_full_export.py
+.venv/bin/python scripts/build_agriculture_lexicon_from_agrovoc.py \
+  --input data_model/generated/agrovoc_full_export.jsonl
+.venv/bin/python scripts/build_agriculture_anchor_texts.py
+.venv/bin/python scripts/compute_agriculture_bucket_centroids.py \
+  --inputs data_model/generated/agriculture_anchor_texts.jsonl
+```
+
+- The AGROVOC full-export script now supports retries and checkpointed resume:
+
+```bash
+.venv/bin/python scripts/build_agrovoc_full_export.py --page-size 100
+.venv/bin/python scripts/build_agrovoc_full_export.py --page-size 100 --resume
+```
+
+- Checkpoint file:
+  - `data_model/generated/agrovoc_full_export.checkpoint.json`
+
+- Design principle:
+  - the full AGROVOC export is intentionally broad and supports semantic coverage
+  - the runtime lexicon remains filtered so exact lexical triggers do not become noisy
+
+- The current curated lexicon already includes explicit bee-health, apiculture, pollination, and plant-protection concepts so agriculture gating does not depend solely on generic crop terms.
 
 ## API Endpoints
 
@@ -216,6 +269,27 @@ Representative response fields:
 - `skip_reason`: explanation when classification is intentionally skipped
 - `category_used`: deterministic category routing used for the uploaded file
 - `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results
+
+## Docker Build Notes
+
+The Docker build now optimizes the heaviest layers:
+
+- installs `torch` from the CPU wheel index instead of pulling larger default builds
+- uses BuildKit cache mounts for `pip` and Hugging Face model downloads
+- makes agriculture embedding predownload optional at build time
+
+Default build script behavior in [build_and_push_images.sh](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/build_and_push_images.sh):
+
+- `DOCKER_BUILDKIT=1`
+- `PRELOAD_AGRI_MODEL=false`
+- `TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu`
+
+Example:
+
+```bash
+bash build_and_push_images.sh
+PRELOAD_AGRI_MODEL=true bash build_and_push_images.sh
+```
 - `processing_info.routing`: whether text and vision were requested, used, and why
 - `processing_info.language_detection`: detected language, confidence, and whether non-English LLM-primary routing was applied
 - `processing_info.routing.audio_mode`: present for the audio branch
@@ -240,6 +314,21 @@ Current URL behavior:
 - uses PageSense raw text only; it does not ingest downloaded file bytes in this service
 - stays text-only after extraction, so OCR and vision routing do not apply
 - `use_agri_gate`: if `true`, send the URL to Agri Gate before PageSense extraction; default `false`
+- successful PageSense results are cached in-memory by URL for faster repeat requests
+- agriculture relevance results are cached in-memory by normalized text hash for faster repeat classification
+- current default cache settings are:
+  - `URL_EXTRACTION_CACHE_TTL_SEC=172800` (`48` hours)
+  - `AGRICULTURE_CACHE_TTL_SEC=172800` (`48` hours)
+  - `RUNTIME_CACHE_MAX_ENTRIES=256`
+  - `RUNTIME_CACHE_MAX_BYTES=67108864` (`64` MB per in-memory cache, approximate)
+- text LLM is no longer mandatory on the URL path:
+  - it now runs mainly for non-English content, low-confidence heuristic outcomes, or close-candidate cases
+  - strong heuristic URL classifications can return without paying the extra text-LLM round-trip
+- URL text sent to the text LLM is now sampled from the beginning, middle, and end instead of always sending the full extracted body
+- when PageSense returns metadata, the URL branch now enforces the same practical caps as file uploads:
+  - document-like URL content above `MAX_DOCUMENT_UNITS=100` is rejected
+  - audio/video URL content above `3000` seconds is rejected
+  - non-audio/video URL content above `MAX_OTHER_UPLOAD_SIZE_MB=50` is rejected
 - can currently route URL content into `Document`, `Dataset`, or `Software Application`
 - returns category-level output for `Software Application` and skips subtype scoring for that category for now
 
@@ -256,8 +345,12 @@ Representative response fields:
 - `processing_info.security_gate`: Agri Gate scan status, reason code, and strict-mode outcome
 - `processing_info.source_mode`: `url`
 - `processing_info.extraction`: PageSense extraction metadata
+  it can now include `content_kind`, `content_type`, `size_bytes`, `page_count`, and `duration_seconds`
+- `processing_info.cache`: cache-hit flags for `pagesense` and `agriculture`
+- `processing_info.stage_timings_ms`: now includes URL-path timings such as `agri_gate_ms`, `pagesense_ms`, `agriculture_pipeline_ms`, `text_llm_ms`, and `fusion_ms`
 - `best_match`: top candidate after heuristics-only scoring or fusion
 - `classification_skipped`: whether the URL stopped at the agriculture gate or category gate
+- `processing_info.eligibility_gate`: KO-eligibility decision used to skip agriculture-related but non-eligible content
 - `category_used`: category selected for downstream URL classification
 - `category_inference`: inferred high-level category for the extracted URL text
 - `agriculture_relevance`: agri/non-agri decision with matched concepts and stage results

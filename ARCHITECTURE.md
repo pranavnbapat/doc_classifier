@@ -70,7 +70,7 @@ before file classification and before URL extraction when `use_agri_gate=true`. 
 - Video helpers: [extract.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/video/extract.py)
 - URL extraction: [pagesense.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/integrations/pagesense.py)
 
-The service first normalizes supported document, tabular, image, audio, and video files into a common internal representation. OCR fallback is currently available for PDFs and images when extracted text quality is poor. CSV, TSV, and XLSX files are flattened into text summaries for agriculture gating and dataset classification. Audio files use optional transcription before agriculture gating and audio subtype scoring. Video files use optional audio extraction plus transcription and optional sampled-frame extraction through FFmpeg. URL submissions are sent to PageSense, which returns raw readable text only, so the URL branch is text-only after extraction.
+The service first normalizes supported document, tabular, image, audio, and video files into a common internal representation. OCR fallback is currently available for PDFs and images when extracted text quality is poor. CSV, TSV, and XLSX files are flattened into text summaries for agriculture gating and dataset classification. Audio files use optional transcription before agriculture gating and audio subtype scoring. Video files use optional audio extraction plus transcription and optional sampled-frame extraction through FFmpeg. URL submissions are sent to PageSense, which returns raw readable text only, so the URL branch is text-only after extraction. Successful URL extraction results are cached in-memory by URL, and agriculture relevance is cached by normalized text hash to reduce repeat latency. Those caches are bounded by both TTL and an approximate memory budget.
 
 ### 3. Category Routing And URL Inference
 
@@ -93,20 +93,56 @@ For `POST /classify-url`, category inference is text-based rather than extension
 - `Software Application`
 - `Document`
 
+On the URL branch, text LLM is now conditional rather than automatic. It is primarily used when:
+
+- the extracted content is strongly non-English
+- heuristic subtype confidence is below threshold
+- top candidates are too close to separate confidently
+
+Strong heuristic URL outcomes can return without the extra text-LLM round-trip.
+
 `Software Application` currently returns category-level output only and skips subtype scoring.
 
 ### 4. Agriculture Relevance Gate
 
 - Module: [agriculture_pipeline.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/domain/agriculture_pipeline.py)
 - Lexicon source: [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon.json)
+- Generated Stage 2 resources: [data_model/generated](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/generated)
 
 The service now performs agriculture relevance assessment before document-subcategory classification:
 
 - Stage 1: AGROVOC-style multilingual lexicon
-- Stage 2: local multilingual embedding model when available
+- Stage 2: local multilingual embedding model when available, preferring generated per-bucket agriculture centroids over hand-written prototype strings
 - Stage 3: text LLM fallback only for ambiguous cases
 
 If `require_agriculture=true` and the file is assessed as non-agriculture, the API returns early and skips subcategory classification.
+
+After the agriculture gate, the runtime now applies a KO-eligibility gate for text-bearing content. This prevents agriculture-adjacent but non-eligible artifacts such as vacancies, calls for applications, event notices, and procurement notices from reaching subtype classification.
+
+The repo now includes an explicit build path for Stage 2 resources:
+
+- [build_agriculture_anchor_texts.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_anchor_texts.py)
+- [build_agrovoc_anchor_texts.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_anchor_texts.py)
+- [build_agrovoc_full_export.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_full_export.py)
+- [build_agriculture_lexicon_from_agrovoc.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_lexicon_from_agrovoc.py)
+- [compute_agriculture_bucket_centroids.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/compute_agriculture_bucket_centroids.py)
+
+This keeps the runtime fast and explainable:
+
+- Stage 1 handles obvious agriculture hits cheaply with multilingual lexicon matching from a filtered runtime lexicon
+- Stage 2 uses a small multilingual embedding model plus generated per-bucket centroids for semantic recovery when Stage 1 is weak or incomplete
+- Stage 3 stays reserved for the genuinely uncertain tail
+
+The intended data flow is now:
+
+- full AGROVOC export -> broad multilingual concept store
+- override/blocklist layer -> conservative runtime lexical trigger set
+- runtime lexicon -> fast Stage 1 matching
+- generated anchor texts and centroids -> broad Stage 2 semantic recovery
+
+Operational note:
+
+- [build_agrovoc_full_export.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_full_export.py) now supports retryable paging and checkpoint-based resume because the public FAO SPARQL endpoint can time out on broad export jobs.
 
 ### 5. Dataset Subtype Scoring
 

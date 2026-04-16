@@ -162,9 +162,18 @@ cython_debug/
 # JSON data files (often contain sensitive data or are large)
 *.json
 !data_model/*.json
+!data_model/generated/*.json
+*.jsonl
+!data_model/generated/agriculture_anchor_texts.jsonl
+*.npz
+!data_model/generated/agriculture_bucket_centroids.npz
 !schema*.json
 !package.json
 !package-lock.json
+
+# Generated agriculture build artifacts
+data_model/generated/agrovoc_full_export.jsonl
+data_model/generated/agrovoc_full_export.checkpoint.json
 
 # PDF documents (sensitive content, binary files)
 *.pdf
