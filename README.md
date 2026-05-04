@@ -2,6 +2,24 @@
 
 FastAPI service for explainable category and subcategory classification. The current runtime scope covers document-family, tabular, image, audio, and video uploads in `.pdf`, `.txt`, `.docx`, `.pptx`, `.csv`, `.tsv`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.mpeg`, `.mpg`, `.mkv`, `.flv`, `.webm`, `.3gp`, `.mts`, `.m2ts`, `.vob`, and `.rmvb`, plus public `http`/`https` URLs through a PageSense-backed text extraction path. Deterministic heuristics are always available, with optional text and vision LLM augmentation where the runtime path supports them. Agri Gate can be enabled per request for both files and URLs.
 
+## Dependency Sync
+
+To ensure the local virtualenv contains only the packages implied by [requirements.txt](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/requirements.txt), use:
+
+```bash
+bash scripts/sync_env.sh recreate
+```
+
+That removes `.venv`, creates a fresh one, and installs from `requirements.txt`.
+
+If you want to keep the existing `.venv` but uninstall packages that are no longer required:
+
+```bash
+bash scripts/sync_env.sh sync
+```
+
+That uses `pip-tools` and `pip-sync` so only the packages required by `requirements.txt` remain installed.
+
 The broader category and KO-ingestion policy work is documented under [category_auto_selection_policy.md](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/category_auto_selection_policy.md). That policy covers `Document`, `Video`, `Audio`, `Image`, `Dataset`, and `Software Application`. The current `/classify` endpoint now uses deterministic MIME/file-type routing for `Document`, `Dataset`, `Image`, `Audio`, and `Video`, and routes each branch to its current subtype logic.
 
 ## What The API Does

@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import JSONResponse
+from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import secrets
 
@@ -68,6 +69,12 @@ from docint.rubrics.pedagogy import score_pedagogy
 from docint.rubrics.procedure import score_procedure
 from docint.rubrics.subcategory_scorer import score_subcategories, SubcategoryScore
 from docint.rubrics.subcategories import SUBCATEGORIES, get_subcategory_criteria
+from docint.subtypes.unified import (
+    LEGACY_TO_UNIFIED,
+    load_unified_subtypes,
+    map_probs_to_unified,
+    score_unified_subcategories,
+)
 from docint.fusion.intelligent_fusion import (
     intelligent_fusion, 
     SourceResult, 
@@ -77,6 +84,8 @@ from docint.fusion.intelligent_fusion import (
 
 # Load environment variables
 load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VISUALISATIONS_DIR = os.path.join(BASE_DIR, "visualisations")
 
 # =============================================================================
 # CONFIGURATION
@@ -331,11 +340,22 @@ app = FastAPI(
     6. Use text LLM for agri text-rich assets when enabled
     7. Trigger vision only for low-confidence, visually-driven, or weak-text file cases
     8. Fuse available sources using the selected strategy
+
+    ## Visualisations
+
+    * Subcategory graph: `/visualisations/subcategories_graph.html`
     """,
     version="2.0.0",
     docs_url="/docs",  # Enable docs - they'll be protected by middleware
     redoc_url="/redoc",
 )
+
+if os.path.isdir(VISUALISATIONS_DIR):
+    app.mount(
+        "/visualisations",
+        StaticFiles(directory=VISUALISATIONS_DIR, html=False),
+        name="visualisations",
+    )
 
 
 # =============================================================================
@@ -410,6 +430,141 @@ def _criteria_by_name() -> Dict[str, Dict[str, Any]]:
 
 def _subcategory_key_by_name() -> Dict[str, str]:
     return {subcat.name: key for key, subcat in SUBCATEGORIES.items()}
+
+
+def _unified_key_by_name() -> Dict[str, str]:
+    return {subcat.name: key for key, subcat in load_unified_subtypes().items()}
+
+
+def _legacy_name_probs_from_candidates(candidates: List[SubcategoryCandidate]) -> Dict[str, float]:
+    return {candidate.subcategory_name: candidate.probability for candidate in candidates}
+
+
+def _build_unified_candidates(
+    *,
+    category: str,
+    text: str,
+    filename: str,
+    legacy_probs: Dict[str, float],
+) -> tuple[List[SubcategoryCandidate], Optional[SubcategoryCandidate]]:
+    unified_scores = score_unified_subcategories(
+        text=text,
+        category=category,
+        legacy_probs=legacy_probs,
+        filename=filename,
+    )
+    unified_candidates = build_probability_distribution(unified_scores)
+    add_contrastive_rationales(unified_candidates)
+    best = unified_candidates[0] if unified_candidates else None
+    return unified_candidates, best
+
+
+def _map_source_result_to_unified(source: Optional[SourceResult]) -> Optional[SourceResult]:
+    if not source:
+        return None
+    mapped_probs = map_probs_to_unified(source.probs)
+    mapped_key = LEGACY_TO_UNIFIED.get(source.subcategory_key, source.subcategory_key)
+    return SourceResult(
+        source_name=source.source_name,
+        subcategory_key=mapped_key,
+        confidence=source.confidence,
+        probs=mapped_probs,
+        evidence_score=source.evidence_score,
+        rationale=source.rationale,
+    )
+
+
+def _map_llm_payload_to_unified(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not payload or "error" in payload:
+        return payload
+    mapped_key = LEGACY_TO_UNIFIED.get(str(payload.get("subcategory_key", "")), str(payload.get("subcategory_key", "")))
+    name = load_unified_subtypes().get(mapped_key).name if mapped_key in load_unified_subtypes() else payload.get("subcategory_name")
+    mapped = dict(payload)
+    mapped["subcategory_key"] = mapped_key
+    mapped["subcategory_name"] = name
+    if isinstance(mapped.get("probs"), dict):
+        mapped["probs"] = map_probs_to_unified(mapped["probs"])
+    return mapped
+
+
+def _compact_candidate(candidate: SubcategoryCandidate) -> SubcategoryCandidate:
+    compact = candidate.model_copy(deep=True)
+    compact.feature_details = {}
+    compact.supporting_sources = None
+    compact.source_confidences = None
+    compact.source_rationales = None
+    return compact
+
+
+def _compact_security_gate(security_gate: Dict[str, Any]) -> Dict[str, Any]:
+    compact = dict(security_gate or {})
+    details = compact.get("details")
+    if isinstance(details, dict):
+        compact["details"] = {
+            "mime_type": details.get("mime_type"),
+            "extension": details.get("extension"),
+            "size_bytes": details.get("size_bytes"),
+            "scan_duration_ms": details.get("scan_duration_ms"),
+            "malware_scan": details.get("malware_scan"),
+            "format": (details.get("deep_inspection") or {}).get("format") if isinstance(details.get("deep_inspection"), dict) else None,
+            "inspection_status": (details.get("deep_inspection") or {}).get("status") if isinstance(details.get("deep_inspection"), dict) else None,
+            "findings_count": len((details.get("deep_inspection") or {}).get("findings", [])) if isinstance(details.get("deep_inspection"), dict) else None,
+        }
+    return compact
+
+
+def _compact_model_payload(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not payload:
+        return payload
+    if "error" in payload:
+        return {"error": payload.get("error"), "model": payload.get("model")}
+    compact = {
+        "subcategory_key": payload.get("subcategory_key"),
+        "subcategory_name": payload.get("subcategory_name"),
+        "confidence": payload.get("confidence"),
+        "model": payload.get("model"),
+    }
+    if payload.get("agriculture_related") is not None:
+        compact["agriculture_related"] = payload.get("agriculture_related")
+    if payload.get("agriculture_confidence") is not None:
+        compact["agriculture_confidence"] = payload.get("agriculture_confidence")
+    return compact
+
+
+def _compact_agriculture_response(agri: AgricultureRelevance) -> AgricultureRelevance:
+    compact = agri.model_copy(deep=True)
+    compact.matched_terms = compact.matched_terms[:8]
+    compact.matched_buckets = compact.matched_buckets[:5]
+    compact.matched_concepts = compact.matched_concepts[:8]
+    compact.stage_results = []
+    return compact
+
+
+def _compact_processing_info(processing_info: Dict[str, Any]) -> Dict[str, Any]:
+    compact = dict(processing_info or {})
+    compact["security_gate"] = _compact_security_gate(compact.get("security_gate", {}))
+    return compact
+
+
+def _prepare_response(
+    result: ClassificationResponse,
+    *,
+    top_k_candidates: int,
+    debug: bool,
+) -> ClassificationResponse:
+    prepared = result.model_copy(deep=True)
+    if debug:
+        return prepared
+
+    prepared.all_candidates = [_compact_candidate(c) for c in prepared.all_candidates[:top_k_candidates]]
+    prepared.best_match = _compact_candidate(prepared.best_match) if prepared.best_match else None
+    prepared.heuristics = _compact_candidate(prepared.heuristics) if prepared.heuristics else None
+    prepared.vision_llm = _compact_model_payload(prepared.vision_llm)
+    prepared.text_llm = _compact_model_payload(prepared.text_llm)
+    prepared.agriculture_relevance = _compact_agriculture_response(prepared.agriculture_relevance)
+    prepared.processing_info = _compact_processing_info(prepared.processing_info)
+    prepared.total_candidates = len(prepared.all_candidates)
+    return prepared
 
 
 def add_fusion_explanations(
@@ -940,6 +1095,23 @@ def classify_url_text(
         ],
     )
 
+    base_document_info = {
+        "filename": url,
+        "pages": 1,
+        "unit_label": "url",
+        "asset_type": "url",
+        "inferred_category": category_result.category,
+        "source": "pagesense",
+        "text_length": len(text),
+        "text_quality": {
+            "chars": quality.metrics.get("chars"),
+            "letters": quality.metrics.get("letters"),
+            "letter_ratio": quality.metrics.get("letter_ratio"),
+            "ok": quality.ok,
+        } if hasattr(quality, "metrics") else None,
+        "title": title,
+    }
+
     stage_start = time.time()
     eligibility_result = _assess_ko_eligibility(text=text, use_text_llm=use_text_llm)
     stage_timings_ms["ko_eligibility_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -979,23 +1151,6 @@ def classify_url_text(
                 "stage_timings_ms": stage_timings_ms,
             },
         )
-
-    base_document_info = {
-        "filename": url,
-        "pages": 1,
-        "unit_label": "url",
-        "asset_type": "url",
-        "inferred_category": category_result.category,
-        "source": "pagesense",
-        "text_length": len(text),
-        "text_quality": {
-            "chars": quality.metrics.get("chars"),
-            "letters": quality.metrics.get("letters"),
-            "letter_ratio": quality.metrics.get("letter_ratio"),
-            "ok": quality.ok,
-        } if hasattr(quality, "metrics") else None,
-        "title": title,
-    }
 
     if require_agriculture and not agri_relevance.is_agriculture_related:
         processing_time_ms = (time.time() - start_time) * 1000
@@ -1111,9 +1266,14 @@ def classify_url_text(
     if category_result.category == "Dataset":
         stage_start = time.time()
         _, dataset_scores = score_dataset_subcategories(text, lines)
-        dataset_candidates = build_probability_distribution(dataset_scores)
-        add_contrastive_rationales(dataset_candidates)
-        dataset_best = dataset_candidates[0] if dataset_candidates else None
+        legacy_dataset_candidates = build_probability_distribution(dataset_scores)
+        legacy_dataset_probs = _legacy_name_probs_from_candidates(legacy_dataset_candidates)
+        dataset_candidates, dataset_best = _build_unified_candidates(
+            category=category_result.category,
+            text=text,
+            filename=url,
+            legacy_probs=legacy_dataset_probs,
+        )
         dataset_heuristics_best = dataset_best.model_copy(deep=True) if dataset_best else None
         stage_timings_ms["dataset_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
         dataset_text_result = None
@@ -1151,32 +1311,28 @@ def classify_url_text(
                     source_name="text_llm",
                     rationale=llm_res.rationale,
                 )
-                dataset_text_result = {
+                dataset_text_result = _map_llm_payload_to_unified({
                     "subcategory_key": llm_res.subcategory_key,
                     "subcategory_name": llm_res.subcategory_name,
                     "confidence": round(llm_res.confidence, 4),
                     "rationale": llm_res.rationale,
                     "model": LLM_MODEL,
-                }
+                    "probs": llm_res.probs,
+                })
+                dataset_text_source = _map_source_result_to_unified(dataset_text_source)
             except Exception as e:
                 dataset_text_result = {"error": str(e), "model": LLM_MODEL}
             stage_timings_ms["dataset_text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
 
         if non_english_llm_primary and dataset_text_source:
-            name_to_dataset_key = {subtype.name: key for key, subtype in DATASET_SUBTYPES.items()}
-            _apply_source_probabilities(dataset_candidates, dataset_text_source.probs, name_to_dataset_key)
+            _apply_source_probabilities(dataset_candidates, dataset_text_source.probs, _unified_key_by_name())
             add_contrastive_rationales(dataset_candidates)
             dataset_best = dataset_candidates[0] if dataset_candidates else None
         elif dataset_best and dataset_text_source:
-            name_to_dataset_key = {subtype.name: key for key, subtype in DATASET_SUBTYPES.items()}
-            dataset_heuristics_probs = {
-                name_to_dataset_key.get(candidate.subcategory_name, candidate.subcategory_name): candidate.probability
-                for candidate in dataset_candidates
-            }
             dataset_heuristics_source = convert_to_source_result(
-                subcategory_key=name_to_dataset_key.get(dataset_best.subcategory_name, list(dataset_heuristics_probs.keys())[0]),
+                subcategory_key=dataset_best.subcategory_id,
                 confidence=dataset_best.confidence,
-                probs=dataset_heuristics_probs,
+                probs={candidate.subcategory_id: candidate.probability for candidate in dataset_candidates},
                 source_name="heuristics",
                 evidence_score=dataset_best.evidence_score,
                 rationale=dataset_best.rationale,
@@ -1197,8 +1353,7 @@ def classify_url_text(
                 rationale=fusion_result.rationale,
             )
             for candidate in dataset_candidates:
-                dataset_key = name_to_dataset_key.get(candidate.subcategory_name, candidate.subcategory_name)
-                fused_prob = round(fusion_result.probs.get(dataset_key, 0), 4)
+                fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
                 candidate.probability = fused_prob
                 candidate.confidence = fused_prob
             dataset_candidates.sort(key=lambda item: item.probability, reverse=True)
@@ -1275,18 +1430,22 @@ def classify_url_text(
         rubric_scores=rubric_scores,
         parent_type_filter=None,
     )
-    candidates = build_probability_distribution(all_scores)
-    add_contrastive_rationales(candidates)
-    best_candidate = candidates[0] if candidates else None
+    legacy_candidates = build_probability_distribution(all_scores)
+    legacy_probs = _legacy_name_probs_from_candidates(legacy_candidates)
+    candidates, best_candidate = _build_unified_candidates(
+        category=category_result.category,
+        text=text,
+        filename=url,
+        legacy_probs=legacy_probs,
+    )
     heuristics_best = best_candidate.model_copy(deep=True) if best_candidate else None
     final_candidates = [c.model_copy(deep=True) for c in candidates]
-    key_by_name = _subcategory_key_by_name()
     heuristics_probs = {
-        key_by_name.get(c.subcategory_name, c.subcategory_name): c.probability
+        c.subcategory_id: c.probability
         for c in candidates
     }
     heuristics_source = convert_to_source_result(
-        subcategory_key=key_by_name.get(best_candidate.subcategory_name, "") if best_candidate else "",
+        subcategory_key=best_candidate.subcategory_id if best_candidate else "",
         confidence=best_candidate.confidence if best_candidate else 0.0,
         probs=heuristics_probs,
         source_name="heuristics",
@@ -1335,13 +1494,15 @@ def classify_url_text(
                 source_name="text_llm",
                 rationale=llm_res.rationale,
             )
-            llm_results["text"] = {
+            llm_results["text"] = _map_llm_payload_to_unified({
                 "subcategory_key": llm_res.subcategory_key,
                 "subcategory_name": llm_res.subcategory_name,
                 "confidence": round(llm_res.confidence, 4),
                 "rationale": llm_res.rationale,
                 "model": LLM_MODEL,
-            }
+                "probs": llm_res.probs,
+            })
+            text_source = _map_source_result_to_unified(text_source)
         except Exception as e:
             llm_results["text"] = {"error": str(e), "model": LLM_MODEL}
         stage_timings_ms["text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -1351,7 +1512,7 @@ def classify_url_text(
     if text_source:
         sources_for_fusion.append(text_source)
     if non_english_llm_primary and text_source:
-        _apply_source_probabilities(final_candidates, text_source.probs, key_by_name)
+        _apply_source_probabilities(final_candidates, text_source.probs, _unified_key_by_name())
         add_contrastive_rationales(final_candidates)
     elif text_source:
         stage_start = time.time()
@@ -1371,8 +1532,7 @@ def classify_url_text(
             rationale=fusion_result.rationale,
         )
         for c in final_candidates:
-            subcat_key = key_by_name.get(c.subcategory_name, c.subcategory_name)
-            fused_prob = round(fusion_result.probs.get(subcat_key, 0), 4)
+            fused_prob = round(fusion_result.probs.get(c.subcategory_id, 0), 4)
             c.probability = fused_prob
             c.confidence = fused_prob
         final_candidates.sort(key=lambda x: x.probability, reverse=True)
@@ -1603,7 +1763,13 @@ def classify_document(
         image_candidates = build_probability_distribution(image_scores)
         add_contrastive_rationales(image_candidates)
         image_best = image_candidates[0] if image_candidates else None
-        image_heuristics_best = image_best.model_copy(deep=True) if image_best else None
+        unified_image_candidates, unified_image_best = _build_unified_candidates(
+            category=category_result.category,
+            text=asset.text,
+            filename=filename,
+            legacy_probs=_legacy_name_probs_from_candidates(image_candidates),
+        )
+        image_heuristics_best = unified_image_best.model_copy(deep=True) if unified_image_best else None
         stage_timings_ms["image_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
         image_vision_result = None
         image_fusion = None
@@ -1620,9 +1786,10 @@ def classify_document(
                     model=VISION_LLM_MODEL,
                     temperature=0.2,
                 )
+                image_unified_key = vlm_res.get("subcategory")
                 image_vision_result = {
-                    "subcategory_key": vlm_res.get("subcategory"),
-                    "subcategory_name": IMAGE_SUBTYPES.get(vlm_res.get("subcategory"), next(iter(IMAGE_SUBTYPES.values()))).name if vlm_res.get("subcategory") else None,
+                    "subcategory_key": image_unified_key,
+                    "subcategory_name": load_unified_subtypes().get(image_unified_key).name if image_unified_key in load_unified_subtypes() else None,
                     "confidence": round(float(vlm_res.get("confidence", 0.0)), 4),
                     "rationale": vlm_res.get("rationale", ""),
                     "model": VISION_LLM_MODEL,
@@ -1635,22 +1802,21 @@ def classify_document(
                 agriculture_response.method = "image_vision_override"
                 agriculture_response.rationale = str(vlm_res.get("rationale", agriculture_response.rationale))
 
-                if image_best:
-                    name_to_image_key = {subtype.name: key for key, subtype in IMAGE_SUBTYPES.items()}
+                if unified_image_best:
                     heuristics_probs = {
-                        name_to_image_key.get(candidate.subcategory_name, candidate.subcategory_name): candidate.probability
-                        for candidate in image_candidates
+                        candidate.subcategory_id: candidate.probability
+                        for candidate in unified_image_candidates
                     }
                     heuristics_source = convert_to_source_result(
-                        subcategory_key=name_to_image_key.get(image_best.subcategory_name, list(heuristics_probs.keys())[0]),
-                        confidence=image_best.confidence,
+                        subcategory_key=unified_image_best.subcategory_id,
+                        confidence=unified_image_best.confidence,
                         probs=heuristics_probs,
                         source_name="heuristics",
-                        evidence_score=image_best.evidence_score,
-                        rationale=image_best.rationale,
+                        evidence_score=unified_image_best.evidence_score,
+                        rationale=unified_image_best.rationale,
                     )
                     vision_source = convert_to_source_result(
-                        subcategory_key=vlm_res.get("subcategory") or list(IMAGE_SUBTYPES.keys())[0],
+                        subcategory_key=image_unified_key or list(heuristics_probs.keys())[0],
                         confidence=float(vlm_res.get("confidence", 0.0)),
                         probs=vlm_res.get("probs", {}),
                         source_name="vision_llm",
@@ -1671,16 +1837,15 @@ def classify_document(
                         agreement_score=fusion_result.agreement_score,
                         rationale=fusion_result.rationale,
                     )
-                    for candidate in image_candidates:
-                        image_key = name_to_image_key.get(candidate.subcategory_name, candidate.subcategory_name)
-                        fused_prob = round(fusion_result.probs.get(image_key, 0), 4)
+                    for candidate in unified_image_candidates:
+                        fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
                         candidate.probability = fused_prob
                         candidate.confidence = fused_prob
-                    image_candidates.sort(key=lambda item: item.probability, reverse=True)
-                    for idx, candidate in enumerate(image_candidates, start=1):
+                    unified_image_candidates.sort(key=lambda item: item.probability, reverse=True)
+                    for idx, candidate in enumerate(unified_image_candidates, start=1):
                         candidate.rank = idx
-                    add_contrastive_rationales(image_candidates)
-                    image_best = image_candidates[0] if image_candidates else None
+                    add_contrastive_rationales(unified_image_candidates)
+                    unified_image_best = unified_image_candidates[0] if unified_image_candidates else None
             except Exception as e:
                 image_vision_result = {"error": str(e), "model": VISION_LLM_MODEL}
             stage_timings_ms["image_vision_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -1728,20 +1893,21 @@ def classify_document(
             )
 
         processing_time_ms = (time.time() - start_time) * 1000
+        unified_image_heuristics = image_heuristics_best
         return ClassificationResponse(
-            best_match=image_best,
-            all_candidates=image_candidates,
+            best_match=unified_image_best,
+            all_candidates=unified_image_candidates,
             fusion=image_fusion,
-            heuristics=image_heuristics_best,
-            vision_llm=image_vision_result,
+            heuristics=unified_image_heuristics,
+            vision_llm=_map_llm_payload_to_unified(image_vision_result),
             text_llm=None,
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
             classification_skipped=False,
             skip_reason=None,
-            total_candidates=len(image_candidates),
-            confidence_threshold_met=bool(image_best and image_best.confidence >= classification_confidence_threshold),
+            total_candidates=len(unified_image_candidates),
+            confidence_threshold_met=bool(unified_image_best and unified_image_best.confidence >= classification_confidence_threshold),
             document_info={
                 "filename": filename,
                 "pages": asset.units,
@@ -1782,7 +1948,13 @@ def classify_document(
         video_candidates = build_probability_distribution(video_scores)
         add_contrastive_rationales(video_candidates)
         video_best = video_candidates[0] if video_candidates else None
-        video_heuristics_best = video_best.model_copy(deep=True) if video_best else None
+        unified_video_candidates, unified_video_best = _build_unified_candidates(
+            category=category_result.category,
+            text=asset.text,
+            filename=filename,
+            legacy_probs=_legacy_name_probs_from_candidates(video_candidates),
+        )
+        video_heuristics_best = unified_video_best.model_copy(deep=True) if unified_video_best else None
         stage_timings_ms["video_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
         video_text_result = None
         video_text_source = None
@@ -1839,7 +2011,7 @@ def classify_document(
                     )
                     video_vision_result = {
                         "subcategory_key": vlm_res.get("subcategory"),
-                        "subcategory_name": VIDEO_SUBTYPES.get(vlm_res.get("subcategory"), next(iter(VIDEO_SUBTYPES.values()))).name if vlm_res.get("subcategory") else None,
+                        "subcategory_name": load_unified_subtypes().get(vlm_res.get("subcategory")).name if vlm_res.get("subcategory") in load_unified_subtypes() else None,
                         "confidence": round(float(vlm_res.get("confidence", 0.0)), 4),
                         "rationale": vlm_res.get("rationale", ""),
                         "model": VISION_LLM_MODEL,
@@ -1953,23 +2125,21 @@ def classify_document(
             )
 
         if non_english_llm_primary and video_text_source:
-            name_to_video_key = {subtype.name: key for key, subtype in VIDEO_SUBTYPES.items()}
-            _apply_source_probabilities(video_candidates, video_text_source.probs, name_to_video_key)
-            video_best = video_candidates[0] if video_candidates else None
-            add_contrastive_rationales(video_candidates)
-        elif video_best:
-            name_to_video_key = {subtype.name: key for key, subtype in VIDEO_SUBTYPES.items()}
+            _apply_source_probabilities(unified_video_candidates, video_text_source.probs, _unified_key_by_name())
+            unified_video_best = unified_video_candidates[0] if unified_video_candidates else None
+            add_contrastive_rationales(unified_video_candidates)
+        elif unified_video_best:
             video_heuristics_probs = {
-                name_to_video_key.get(candidate.subcategory_name, candidate.subcategory_name): candidate.probability
-                for candidate in video_candidates
+                candidate.subcategory_id: candidate.probability
+                for candidate in unified_video_candidates
             }
             video_heuristics_source = convert_to_source_result(
-                subcategory_key=name_to_video_key.get(video_best.subcategory_name, list(video_heuristics_probs.keys())[0]),
-                confidence=video_best.confidence,
+                subcategory_key=unified_video_best.subcategory_id,
+                confidence=unified_video_best.confidence,
                 probs=video_heuristics_probs,
                 source_name="heuristics",
-                evidence_score=video_best.evidence_score,
-                rationale=video_best.rationale,
+                evidence_score=unified_video_best.evidence_score,
+                rationale=unified_video_best.rationale,
             )
             if video_text_source or video_vision_source:
                 fusion_result = intelligent_fusion(
@@ -1987,32 +2157,32 @@ def classify_document(
                     agreement_score=fusion_result.agreement_score,
                     rationale=fusion_result.rationale,
                 )
-                for candidate in video_candidates:
-                    video_key = name_to_video_key.get(candidate.subcategory_name, candidate.subcategory_name)
-                    fused_prob = round(fusion_result.probs.get(video_key, 0), 4)
+                for candidate in unified_video_candidates:
+                    fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
                     candidate.probability = fused_prob
                     candidate.confidence = fused_prob
-                video_candidates.sort(key=lambda item: item.probability, reverse=True)
-                for idx, candidate in enumerate(video_candidates, start=1):
+                unified_video_candidates.sort(key=lambda item: item.probability, reverse=True)
+                for idx, candidate in enumerate(unified_video_candidates, start=1):
                     candidate.rank = idx
-                video_best = video_candidates[0] if video_candidates else None
-                add_contrastive_rationales(video_candidates)
+                unified_video_best = unified_video_candidates[0] if unified_video_candidates else None
+                add_contrastive_rationales(unified_video_candidates)
 
         processing_time_ms = (time.time() - start_time) * 1000
+        unified_video_heuristics = video_heuristics_best
         return ClassificationResponse(
-            best_match=video_best,
-            all_candidates=video_candidates,
+            best_match=unified_video_best,
+            all_candidates=unified_video_candidates,
             fusion=video_fusion,
-            heuristics=video_heuristics_best,
-            vision_llm=video_vision_result,
-            text_llm=video_text_result,
+            heuristics=unified_video_heuristics,
+            vision_llm=_map_llm_payload_to_unified(video_vision_result),
+            text_llm=_map_llm_payload_to_unified(video_text_result),
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
             classification_skipped=False,
             skip_reason=None,
-            total_candidates=len(video_candidates),
-            confidence_threshold_met=bool(video_best and video_best.confidence >= classification_confidence_threshold),
+            total_candidates=len(unified_video_candidates),
+            confidence_threshold_met=bool(unified_video_best and unified_video_best.confidence >= classification_confidence_threshold),
             document_info={
                 "filename": filename,
                 "pages": asset.units,
@@ -2165,7 +2335,13 @@ def classify_document(
         audio_candidates = build_probability_distribution(audio_scores)
         add_contrastive_rationales(audio_candidates)
         audio_best = audio_candidates[0] if audio_candidates else None
-        audio_heuristics_best = audio_best.model_copy(deep=True) if audio_best else None
+        unified_audio_candidates, unified_audio_best = _build_unified_candidates(
+            category=category_result.category,
+            text=asset.text,
+            filename=filename,
+            legacy_probs=_legacy_name_probs_from_candidates(audio_candidates),
+        )
+        audio_heuristics_best = unified_audio_best.model_copy(deep=True) if unified_audio_best else None
         stage_timings_ms["audio_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
         audio_text_result = None
         audio_text_source = None
@@ -2203,23 +2379,21 @@ def classify_document(
             stage_timings_ms["audio_text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
 
         if non_english_llm_primary and audio_text_source:
-            name_to_audio_key = {subtype.name: key for key, subtype in AUDIO_SUBTYPES.items()}
-            _apply_source_probabilities(audio_candidates, audio_text_source.probs, name_to_audio_key)
-            audio_best = audio_candidates[0] if audio_candidates else None
-            add_contrastive_rationales(audio_candidates)
-        elif audio_best and audio_text_source:
-            name_to_audio_key = {subtype.name: key for key, subtype in AUDIO_SUBTYPES.items()}
+            _apply_source_probabilities(unified_audio_candidates, audio_text_source.probs, _unified_key_by_name())
+            unified_audio_best = unified_audio_candidates[0] if unified_audio_candidates else None
+            add_contrastive_rationales(unified_audio_candidates)
+        elif unified_audio_best and audio_text_source:
             audio_heuristics_probs = {
-                name_to_audio_key.get(candidate.subcategory_name, candidate.subcategory_name): candidate.probability
-                for candidate in audio_candidates
+                candidate.subcategory_id: candidate.probability
+                for candidate in unified_audio_candidates
             }
             audio_heuristics_source = convert_to_source_result(
-                subcategory_key=name_to_audio_key.get(audio_best.subcategory_name, list(audio_heuristics_probs.keys())[0]),
-                confidence=audio_best.confidence,
+                subcategory_key=unified_audio_best.subcategory_id,
+                confidence=unified_audio_best.confidence,
                 probs=audio_heuristics_probs,
                 source_name="heuristics",
-                evidence_score=audio_best.evidence_score,
-                rationale=audio_best.rationale,
+                evidence_score=unified_audio_best.evidence_score,
+                rationale=unified_audio_best.rationale,
             )
             fusion_result = intelligent_fusion(
                 heuristics_result=audio_heuristics_source,
@@ -2236,32 +2410,32 @@ def classify_document(
                 agreement_score=fusion_result.agreement_score,
                 rationale=fusion_result.rationale,
             )
-            for candidate in audio_candidates:
-                audio_key = name_to_audio_key.get(candidate.subcategory_name, candidate.subcategory_name)
-                fused_prob = round(fusion_result.probs.get(audio_key, 0), 4)
+            for candidate in unified_audio_candidates:
+                fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
                 candidate.probability = fused_prob
                 candidate.confidence = fused_prob
-            audio_candidates.sort(key=lambda item: item.probability, reverse=True)
-            for idx, candidate in enumerate(audio_candidates, start=1):
+            unified_audio_candidates.sort(key=lambda item: item.probability, reverse=True)
+            for idx, candidate in enumerate(unified_audio_candidates, start=1):
                 candidate.rank = idx
-            audio_best = audio_candidates[0] if audio_candidates else None
-            add_contrastive_rationales(audio_candidates)
+            unified_audio_best = unified_audio_candidates[0] if unified_audio_candidates else None
+            add_contrastive_rationales(unified_audio_candidates)
 
         processing_time_ms = (time.time() - start_time) * 1000
+        unified_audio_heuristics = audio_heuristics_best
         return ClassificationResponse(
-            best_match=audio_best,
-            all_candidates=audio_candidates,
+            best_match=unified_audio_best,
+            all_candidates=unified_audio_candidates,
             fusion=audio_fusion,
-            heuristics=audio_heuristics_best,
+            heuristics=unified_audio_heuristics,
             vision_llm=None,
-            text_llm=audio_text_result,
+            text_llm=_map_llm_payload_to_unified(audio_text_result),
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
             classification_skipped=False,
             skip_reason=None,
-            total_candidates=len(audio_candidates),
-            confidence_threshold_met=bool(audio_best and audio_best.confidence >= classification_confidence_threshold),
+            total_candidates=len(unified_audio_candidates),
+            confidence_threshold_met=bool(unified_audio_best and unified_audio_best.confidence >= classification_confidence_threshold),
             document_info={
                 "filename": filename,
                 "pages": asset.units,
@@ -2385,20 +2559,27 @@ def classify_document(
             dataset_best = dataset_candidates[0] if dataset_candidates else None
             add_contrastive_rationales(dataset_candidates)
         processing_time_ms = (time.time() - start_time) * 1000
+        unified_dataset_candidates, unified_dataset_best = _build_unified_candidates(
+            category=category_result.category,
+            text=asset.text,
+            filename=filename,
+            legacy_probs=_legacy_name_probs_from_candidates(dataset_candidates),
+        )
+        unified_dataset_heuristics = unified_dataset_candidates[0] if unified_dataset_candidates else None
         return ClassificationResponse(
-            best_match=dataset_best,
-            all_candidates=dataset_candidates,
+            best_match=unified_dataset_best,
+            all_candidates=unified_dataset_candidates,
             fusion=dataset_fusion,
-            heuristics=dataset_heuristics_best,
+            heuristics=unified_dataset_heuristics,
             vision_llm=None,
-            text_llm=dataset_text_result,
+            text_llm=_map_llm_payload_to_unified(dataset_text_result),
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
             classification_skipped=False,
             skip_reason=None,
-            total_candidates=len(dataset_candidates),
-            confidence_threshold_met=bool(dataset_best and dataset_best.confidence >= classification_confidence_threshold),
+            total_candidates=len(unified_dataset_candidates),
+            confidence_threshold_met=bool(unified_dataset_best and unified_dataset_best.confidence >= classification_confidence_threshold),
             document_info={
                 "filename": filename,
                 "pages": asset.units,
@@ -2508,22 +2689,28 @@ def classify_document(
     candidates = build_probability_distribution(all_scores)
     add_contrastive_rationales(candidates)
     best_candidate = candidates[0] if candidates else None
-    heuristics_best = best_candidate.model_copy(deep=True) if best_candidate else None
-    final_candidates = [c.model_copy(deep=True) for c in candidates]
-    key_by_name = _subcategory_key_by_name()
+    unified_document_candidates, unified_document_best = _build_unified_candidates(
+        category=category_result.category,
+        text=asset.text,
+        filename=filename,
+        legacy_probs=_legacy_name_probs_from_candidates(candidates),
+    )
+    heuristics_best = unified_document_best.model_copy(deep=True) if unified_document_best else None
+    final_candidates = [c.model_copy(deep=True) for c in unified_document_candidates]
+    key_by_name = _unified_key_by_name()
     
     # Convert heuristics to SourceResult for fusion
     heuristics_probs = {
-        key_by_name.get(c.subcategory_name, c.subcategory_name): c.probability
-        for c in candidates
+        c.subcategory_id: c.probability
+        for c in final_candidates
     }
     heuristics_source = convert_to_source_result(
-        subcategory_key=key_by_name.get(best_candidate.subcategory_name, "") if best_candidate else "",
-        confidence=best_candidate.confidence if best_candidate else 0.0,
+        subcategory_key=unified_document_best.subcategory_id if unified_document_best else "",
+        confidence=unified_document_best.confidence if unified_document_best else 0.0,
         probs=heuristics_probs,
         source_name="heuristics",
-        evidence_score=best_candidate.evidence_score if best_candidate else 0.0,
-        rationale=best_candidate.rationale if best_candidate else "",
+        evidence_score=unified_document_best.evidence_score if unified_document_best else 0.0,
+        rationale=unified_document_best.rationale if unified_document_best else "",
     )
     stage_timings_ms["heuristics_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
     
@@ -2543,7 +2730,7 @@ def classify_document(
     should_use_text_llm = _should_run_text_llm(
         use_text_llm=use_text_llm,
         is_agriculture_related=agri_relevance.is_agriculture_related,
-        best_candidate=best_candidate,
+        best_candidate=unified_document_best,
         current_candidates=final_candidates,
         confidence_threshold=classification_confidence_threshold,
         gap_threshold=TEXT_LLM_GAP_THRESHOLD,
@@ -2598,7 +2785,7 @@ def classify_document(
         ocr_used=asset.source == "ocr",
         text_quality_ok_flag=quality.ok,
         heuristics_source=heuristics_source,
-        best_candidate=best_candidate,
+        best_candidate=unified_document_best,
         current_candidates=final_candidates,
         text_source=text_source,
         confidence_threshold=vision_trigger_threshold,
@@ -2714,20 +2901,24 @@ def classify_document(
     threshold_met = final_best.confidence >= classification_confidence_threshold if final_best else False
     
     processing_time_ms = (time.time() - start_time) * 1000
+    unified_document_candidates = final_candidates
+    unified_document_best = final_best
+    unified_document_heuristics = heuristics_best
+    threshold_met = bool(unified_document_best and unified_document_best.confidence >= classification_confidence_threshold)
     
     return ClassificationResponse(
-        best_match=final_best,
-        all_candidates=final_candidates,
+        best_match=unified_document_best,
+        all_candidates=unified_document_candidates,
         fusion=fusion_info,
-        heuristics=heuristics_best,
-        vision_llm=llm_results.get("vision"),
-        text_llm=llm_results.get("text"),
+        heuristics=unified_document_heuristics,
+        vision_llm=_map_llm_payload_to_unified(llm_results.get("vision")),
+        text_llm=_map_llm_payload_to_unified(llm_results.get("text")),
         category_used=category_result.category,
         category_inference=None,
         agriculture_relevance=agriculture_response,
         classification_skipped=False,
         skip_reason=None,
-        total_candidates=len(final_candidates),
+        total_candidates=len(unified_document_candidates),
         confidence_threshold_met=threshold_met,
         document_info={
             "filename": filename,
@@ -2837,6 +3028,9 @@ async def root(request: Request):
         "features": ["heuristics", "vision_llm", "text_llm", "intelligent_fusion"],
         "docs": "/docs",
         "health": "/health",
+        "visualisations": {
+            "subcategories_graph": "/visualisations/subcategories_graph.html",
+        },
     }
 
 
@@ -2899,6 +3093,8 @@ async def health(request: Request):
 async def classify_endpoint(
     request: Request,
     file: UploadFile = File(..., description="Supported KO asset file to classify"),
+    debug: bool = Query(False, description="If true, include full internal scoring/debug details in the response"),
+    top_k_candidates: int = Query(5, ge=1, le=10, description="Maximum number of ranked subtype candidates returned when debug is false"),
     use_agri_gate: bool = Query(False, description="If true, send the uploaded file to Agri Gate before classification"),
     require_agriculture: bool = Query(True, description="Skip subtype classification for assets assessed as non-agriculture"),
     auto_route_models: bool = Query(True, description="Automatically decide whether text and vision models should be used"),
@@ -3054,7 +3250,7 @@ async def classify_endpoint(
         )
         result.processing_info["security_gate"] = agri_gate_payload
         result.processing_info["source_mode"] = "file"
-        return result
+        return _prepare_response(result, top_k_candidates=top_k_candidates, debug=debug)
     except HTTPException:
         raise
     except Exception as e:
@@ -3070,6 +3266,8 @@ async def classify_endpoint(
 @app.post("/classify-url", response_model=ClassificationResponse)
 async def classify_url_endpoint(
     body: UrlClassificationRequest,
+    debug: bool = Query(False, description="If true, include full internal scoring/debug details in the response"),
+    top_k_candidates: int = Query(5, ge=1, le=10, description="Maximum number of ranked subtype candidates returned when debug is false"),
     use_agri_gate: bool = Query(False, description="If true, send the submitted URL to Agri Gate before extraction"),
     require_agriculture: bool = Query(True, description="Skip subtype classification for URLs assessed as non-agriculture"),
     auto_route_models: bool = Query(True, description="Automatically decide whether text models should be used"),
@@ -3186,7 +3384,7 @@ async def classify_url_endpoint(
     result.processing_info.setdefault("stage_timings_ms", {}).update(endpoint_stage_timings_ms)
     result.processing_info["security_gate"] = agri_gate_payload
     result.processing_info["source_mode"] = "url"
-    return result
+    return _prepare_response(result, top_k_candidates=top_k_candidates, debug=debug)
 
 
 @app.get("/subcategories")

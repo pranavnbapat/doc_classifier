@@ -10,317 +10,186 @@ import json
 import os
 import base64
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from pathlib import Path
 
 from openai import OpenAI
 
-# Import subcategory definitions
-from docint.rubrics.subcategories import SUBCATEGORIES
-from docint.category.audio_scorer import AUDIO_SUBTYPES
-from docint.category.dataset_scorer import DATASET_SUBTYPES
-from docint.category.image_scorer import IMAGE_SUBTYPES
-from docint.category.video_scorer import VIDEO_SUBTYPES
+from docint.subtypes.unified import (
+    allowed_unified_keys_for_category,
+    load_category_profiles,
+    load_unified_subtypes,
+)
 
 
-# Build subcategory list from data model
-SUBCAT_TYPES = list(SUBCATEGORIES.keys())
+def _category_keys(category: str) -> List[str]:
+    return list(allowed_unified_keys_for_category(category))
 
 
-def build_subcategory_prompt() -> str:
-    """Build LLM prompt using actual subcategory definitions."""
+def _normalize_probs_for_category(probs: Dict[str, float], category: str) -> Dict[str, float]:
+    keys = _category_keys(category)
+    out = {k: float(probs.get(k, 0.0)) for k in keys}
+    s = sum(out.values())
+    if s <= 0:
+        return {k: round(1.0 / len(keys), 4) for k in keys}
+    return {k: round(v / s, 4) for k, v in out.items()}
+
+
+def _build_unified_category_prompt(
+    category: str,
+    *,
+    include_agriculture_gate: bool = False,
+    include_visual_evidence: bool = False,
+) -> str:
+    defs = load_unified_subtypes()
+    keys = _category_keys(category)
+    profiles = load_category_profiles(category)
     prompt_lines = [
-        "You are a document subcategory classifier.",
-        "Classify the document into ONE subcategory based on observable evidence in the document.",
-        "Use the same measurable criteria vocabulary as the heuristic classifier.",
-        "",
+        f"You are a {category.lower()} classifier for agricultural knowledge objects.",
+        "Use the merged cross-modal subtype model.",
+        "Score category-specific intermediate profiles first, then choose the best final unified subcategory.",
+        "Ground your decision in observable evidence only.",
     ]
-    
-    for key, subcat in SUBCATEGORIES.items():
-        features_desc = ", ".join([f.name for f in subcat.detectable_features])
-        prompt_lines.append(f"- {key} ({subcat.name})")
-        prompt_lines.append(f"  parent_type: {subcat.parent_type.value}")
-        prompt_lines.append(f"  description: {subcat.description}")
-        prompt_lines.append(f"  detectable_features: {features_desc}")
-        if subcat.positive_signal_hints:
-            prompt_lines.append(
-                "  positive_signals: "
-                + ", ".join(subcat.positive_signal_hints)
-            )
-        if subcat.negative_signal_hints:
-            prompt_lines.append(
-                "  negative_signals: "
-                + ", ".join(subcat.negative_signal_hints)
-            )
-        if subcat.close_competitors:
-            prompt_lines.append(
-                "  close_competitors: "
-                + ", ".join(subcat.close_competitors)
-            )
-        prompt_lines.append(
-            f"  minimum_features_required: {subcat.min_features_required}"
-        )
+    if include_agriculture_gate:
+        prompt_lines.append("First decide whether the asset is agriculture-related.")
+    if include_visual_evidence:
+        prompt_lines.append("Use both transcript/text evidence and visual evidence when available.")
+    prompt_lines.extend([
+        "",
+        "Final unified subcategories for this category:",
+    ])
+    for key in keys:
+        item = defs[key]
+        prompt_lines.append(f"- {key} ({item.name})")
+        prompt_lines.append(f"  definition: {item.definition}")
+        prompt_lines.append(f"  scope_note: {item.scope_note}")
+        prompt_lines.append("  detailed_features: " + "; ".join(item.detailed_features))
         prompt_lines.append("")
-    
+
+    prompt_lines.append("Category-specific intermediate profiles:")
+    for profile in profiles:
+        prompt_lines.append(f"- {profile['id']} ({profile['name']})")
+        prompt_lines.append(f"  definition: {profile['definition']}")
+        prompt_lines.append(f"  scope_note: {profile['scope_note']}")
+        imports = []
+        for item in profile.get("imports_to_unified", []):
+            relation = item.get("relation", "primary")
+            imports.append(f"{relation}:{item.get('unified_subcategory_id')}")
+        prompt_lines.append("  maps_to_unified: " + ", ".join(imports))
+        for feature_group in profile.get("feature_groups", []):
+            prompt_lines.append(f"  feature_group: {feature_group['feature_id']}")
+            prompt_lines.append(f"    measurement: {feature_group['measurement']}")
+            prompt_lines.append(
+                "    positive_indicators: " + ", ".join(feature_group.get("positive_indicators", [])[:8])
+            )
+            if feature_group.get("negative_indicators"):
+                prompt_lines.append(
+                    "    negative_indicators: " + ", ".join(feature_group.get("negative_indicators", [])[:8])
+                )
+        prompt_lines.append("")
+
     prompt_lines.extend([
         "Return ONLY valid JSON with:",
-        "1. 'subcategory': the key of the best matching subcategory",
-        "2. 'confidence': your confidence 0.0-1.0",
-        "3. 'rationale': brief explanation citing specific evidence from the text or pages",
-        "4. 'matched_signals': short list of criteria-consistent signals that support the chosen class",
-        "5. 'conflicting_signals': short list of signals that create ambiguity or point elsewhere",
-        "6. 'closest_alternative': the next most plausible subcategory key",
-        "7. 'probs': object with probability for EACH subcategory (should sum to 1.0)",
-        "",
-        "Be honest about uncertainty. If multiple categories seem possible, distribute probability accordingly.",
-        "Prefer signals grounded in the supplied taxonomy, such as IMRaD structure, governance references, slide indicators, regulatory update markers, or tutorial structure.",
     ])
-    
+    if include_agriculture_gate:
+        prompt_lines.extend([
+            "1. 'is_agriculture_related': true or false",
+            "2. 'agriculture_confidence': confidence 0.0-1.0 for agriculture relevance",
+            "3. 'subcategory': the final unified subcategory key if agriculture-related, otherwise null",
+            "4. 'profile_id': the best matching category profile id if agriculture-related, otherwise null",
+            "5. 'confidence': subtype confidence 0.0-1.0",
+            "6. 'rationale': brief explanation citing observable evidence",
+            "7. 'matched_signals': short list of supporting signals",
+            "8. 'conflicting_signals': short list of ambiguity signals",
+            "9. 'closest_alternative': the next most plausible final unified subcategory key",
+            "10. 'probs': object with probability for EACH final unified subcategory key",
+        ])
+    else:
+        prompt_lines.extend([
+            "1. 'subcategory': the final unified subcategory key",
+            "2. 'profile_id': the best matching category profile id",
+            "3. 'confidence': your confidence 0.0-1.0",
+            "4. 'rationale': brief explanation citing observable evidence",
+            "5. 'matched_signals': short list of supporting signals",
+            "6. 'conflicting_signals': short list of ambiguity signals",
+            "7. 'closest_alternative': the next most plausible final unified subcategory key",
+            "8. 'probs': object with probability for EACH final unified subcategory key",
+        ])
+    prompt_lines.append("Be honest about uncertainty. Prefer measurable profile evidence over generic topical wording.")
     return "\n".join(prompt_lines)
 
 
-# Pre-built system prompt
-SYSTEM_PROMPT = build_subcategory_prompt()
+def _build_unified_schema(category: str, *, include_agriculture_gate: bool = False) -> str:
+    keys = _category_keys(category)
+    probs_template = "\n".join([f'    "{k}": 0.0,' for k in keys])
+    if include_agriculture_gate:
+        return f"""Return ONLY valid JSON:
+{{
+  "is_agriculture_related": true,
+  "agriculture_confidence": 0.0,
+  "subcategory": "one_of_the_unified_keys_below_or_null",
+  "profile_id": "one_of_the_profile_ids_below_or_null",
+  "confidence": 0.0,
+  "rationale": "explanation with evidence",
+  "matched_signals": ["signal_1", "signal_2"],
+  "conflicting_signals": ["signal_1"],
+  "closest_alternative": "one_of_the_unified_keys_below",
+  "probs": {{
+{probs_template}
+  }}
+}}
+
+Available unified subcategory keys:
+""" + "\n".join([f"- {k}" for k in keys])
+    return f"""Return ONLY valid JSON:
+{{
+  "subcategory": "one_of_the_unified_keys_below",
+  "profile_id": "one_of_the_profile_ids_below",
+  "confidence": 0.0,
+  "rationale": "explanation with evidence",
+  "matched_signals": ["signal_1", "signal_2"],
+  "conflicting_signals": ["signal_1"],
+  "closest_alternative": "one_of_the_unified_keys_below",
+  "probs": {{
+{probs_template}
+  }}
+}}
+
+Available unified subcategory keys:
+""" + "\n".join([f"- {k}" for k in keys])
+
+
+DOCUMENT_UNIFIED_KEYS = _category_keys("Document")
+DATASET_UNIFIED_KEYS = _category_keys("Dataset")
+IMAGE_UNIFIED_KEYS = _category_keys("Image")
+AUDIO_UNIFIED_KEYS = _category_keys("Audio")
+VIDEO_UNIFIED_KEYS = _category_keys("Video")
+
+SYSTEM_PROMPT = _build_unified_category_prompt("Document")
+DATASET_SYSTEM_PROMPT = _build_unified_category_prompt("Dataset")
+IMAGE_SYSTEM_PROMPT = _build_unified_category_prompt("Image", include_agriculture_gate=True)
+AUDIO_SYSTEM_PROMPT = _build_unified_category_prompt("Audio")
+VIDEO_SYSTEM_PROMPT = _build_unified_category_prompt("Video", include_agriculture_gate=True, include_visual_evidence=True)
 
 
 def build_schema() -> str:
-    """Build JSON schema for response."""
-    probs_template = "\n".join([f'    "{k}": 0.0,' for k in SUBCAT_TYPES])
-    
-    return f"""Return ONLY valid JSON:
-{{
-  "subcategory": "one_of_the_keys_below",
-  "confidence": 0.0,
-  "rationale": "explanation with evidence",
-  "matched_signals": ["signal_1", "signal_2"],
-  "conflicting_signals": ["signal_1"],
-  "closest_alternative": "one_of_the_keys_below",
-  "probs": {{
-{probs_template}
-  }}
-}}
-
-Available subcategory keys:
-""" + "\n".join([f"- {k}" for k in SUBCAT_TYPES])
-
-
-DATASET_TYPES = list(DATASET_SUBTYPES.keys())
-
-
-def build_dataset_subcategory_prompt() -> str:
-    prompt_lines = [
-        "You are a dataset subcategory classifier.",
-        "Classify the dataset into ONE dataset subcategory based on observable schema and content evidence.",
-        "Use dataset-oriented evidence such as columns, record types, units, domain terms, and file/media references.",
-        "",
-    ]
-
-    for key, subtype in DATASET_SUBTYPES.items():
-        prompt_lines.append(f"- {key} ({subtype.name})")
-        prompt_lines.append(f"  description: {subtype.description}")
-        prompt_lines.append("  positive_terms: " + ", ".join(subtype.positive_terms))
-        prompt_lines.append("  schema_terms: " + ", ".join(subtype.column_terms))
-        if subtype.file_terms:
-            prompt_lines.append("  file_terms: " + ", ".join(subtype.file_terms))
-        prompt_lines.append("")
-
-    prompt_lines.extend([
-        "Return ONLY valid JSON with:",
-        "1. 'subcategory': the key of the best matching dataset subcategory",
-        "2. 'confidence': your confidence 0.0-1.0",
-        "3. 'rationale': brief explanation citing schema or content evidence",
-        "4. 'matched_signals': short list of matched schema/content signals",
-        "5. 'conflicting_signals': short list of ambiguity signals",
-        "6. 'closest_alternative': the next most plausible dataset subcategory key",
-        "7. 'probs': object with probability for EACH dataset subcategory (should sum to 1.0)",
-        "",
-        "Be honest about uncertainty. Focus on the actual data structure and field meanings.",
-    ])
-    return "\n".join(prompt_lines)
-
-
-DATASET_SYSTEM_PROMPT = build_dataset_subcategory_prompt()
+    return _build_unified_schema("Document")
 
 
 def build_dataset_schema() -> str:
-    probs_template = "\n".join([f'    "{k}": 0.0,' for k in DATASET_TYPES])
-    return f"""Return ONLY valid JSON:
-{{
-  "subcategory": "one_of_the_dataset_keys_below",
-  "confidence": 0.0,
-  "rationale": "explanation with evidence",
-  "matched_signals": ["signal_1", "signal_2"],
-  "conflicting_signals": ["signal_1"],
-  "closest_alternative": "one_of_the_dataset_keys_below",
-  "probs": {{
-{probs_template}
-  }}
-}}
-
-Available dataset subcategory keys:
-""" + "\n".join([f"- {k}" for k in DATASET_TYPES])
-
-
-IMAGE_TYPES = list(IMAGE_SUBTYPES.keys())
-
-
-def build_image_subcategory_prompt() -> str:
-    prompt_lines = [
-        "You are an image classifier for agricultural knowledge objects.",
-        "First decide whether the image is agriculture-related.",
-        "If it is agriculture-related, classify it into ONE image subcategory based on the visual evidence.",
-        "",
-    ]
-    for key, subtype in IMAGE_SUBTYPES.items():
-        prompt_lines.append(f"- {key} ({subtype.name})")
-        prompt_lines.append(f"  description: {subtype.description}")
-        prompt_lines.append("  positive_terms: " + ", ".join(subtype.positive_terms))
-        prompt_lines.append("")
-    prompt_lines.extend([
-        "Return ONLY valid JSON with:",
-        "1. 'is_agriculture_related': true or false",
-        "2. 'agriculture_confidence': confidence 0.0-1.0 for agriculture relevance",
-        "3. 'subcategory': the key of the best matching image subcategory if agriculture-related, otherwise null",
-        "4. 'confidence': subtype confidence 0.0-1.0",
-        "5. 'rationale': brief explanation citing visible evidence",
-        "6. 'matched_signals': short list of visible signals",
-        "7. 'conflicting_signals': short list of ambiguity signals",
-        "8. 'closest_alternative': the next most plausible image subcategory key",
-        "9. 'probs': object with probability for EACH image subcategory (should sum to 1.0 when agriculture-related)",
-    ])
-    return "\n".join(prompt_lines)
-
-
-IMAGE_SYSTEM_PROMPT = build_image_subcategory_prompt()
+    return _build_unified_schema("Dataset")
 
 
 def build_image_schema() -> str:
-    probs_template = "\n".join([f'    "{k}": 0.0,' for k in IMAGE_TYPES])
-    return f"""Return ONLY valid JSON:
-{{
-  "is_agriculture_related": true,
-  "agriculture_confidence": 0.0,
-  "subcategory": "one_of_the_image_keys_below_or_null",
-  "confidence": 0.0,
-  "rationale": "explanation with evidence",
-  "matched_signals": ["signal_1", "signal_2"],
-  "conflicting_signals": ["signal_1"],
-  "closest_alternative": "one_of_the_image_keys_below",
-  "probs": {{
-{probs_template}
-  }}
-}}
-
-Available image subcategory keys:
-""" + "\n".join([f"- {k}" for k in IMAGE_TYPES])
-
-
-AUDIO_TYPES = list(AUDIO_SUBTYPES.keys())
-
-
-def build_audio_subcategory_prompt() -> str:
-    prompt_lines = [
-        "You are an audio subcategory classifier for agricultural knowledge objects.",
-        "Classify the transcribed audio into ONE audio subcategory based on observable transcript evidence.",
-        "Use the transcript structure, host/guest cues, question-answer patterns, instructional language, and session-style signals.",
-        "",
-    ]
-    for key, subtype in AUDIO_SUBTYPES.items():
-        prompt_lines.append(f"- {key} ({subtype.name})")
-        prompt_lines.append(f"  description: {subtype.description}")
-        prompt_lines.append("  positive_terms: " + ", ".join(subtype.positive_terms))
-        if subtype.filename_terms:
-            prompt_lines.append("  filename_terms: " + ", ".join(subtype.filename_terms))
-        prompt_lines.append("")
-    prompt_lines.extend([
-        "Return ONLY valid JSON with:",
-        "1. 'subcategory': the key of the best matching audio subcategory",
-        "2. 'confidence': your confidence 0.0-1.0",
-        "3. 'rationale': brief explanation citing transcript evidence",
-        "4. 'matched_signals': short list of transcript or structure signals",
-        "5. 'conflicting_signals': short list of ambiguity signals",
-        "6. 'closest_alternative': the next most plausible audio subcategory key",
-        "7. 'probs': object with probability for EACH audio subcategory (should sum to 1.0)",
-    ])
-    return "\n".join(prompt_lines)
-
-
-AUDIO_SYSTEM_PROMPT = build_audio_subcategory_prompt()
+    return _build_unified_schema("Image", include_agriculture_gate=True)
 
 
 def build_audio_schema() -> str:
-    probs_template = "\n".join([f'    "{k}": 0.0,' for k in AUDIO_TYPES])
-    return f"""Return ONLY valid JSON:
-{{
-  "subcategory": "one_of_the_audio_keys_below",
-  "confidence": 0.0,
-  "rationale": "explanation with evidence",
-  "matched_signals": ["signal_1", "signal_2"],
-  "conflicting_signals": ["signal_1"],
-  "closest_alternative": "one_of_the_audio_keys_below",
-  "probs": {{
-{probs_template}
-  }}
-}}
-
-Available audio subcategory keys:
-""" + "\n".join([f"- {k}" for k in AUDIO_TYPES])
-
-
-VIDEO_TYPES = list(VIDEO_SUBTYPES.keys())
-
-
-def build_video_subcategory_prompt() -> str:
-    prompt_lines = [
-        "You are a video classifier for agricultural knowledge objects.",
-        "First decide whether the video is agriculture-related.",
-        "Then classify it into ONE video subcategory based on transcript evidence and sampled video frames.",
-        "",
-    ]
-    for key, subtype in VIDEO_SUBTYPES.items():
-        prompt_lines.append(f"- {key} ({subtype.name})")
-        prompt_lines.append(f"  description: {subtype.description}")
-        prompt_lines.append("  positive_terms: " + ", ".join(subtype.positive_terms))
-        if subtype.filename_terms:
-            prompt_lines.append("  filename_terms: " + ", ".join(subtype.filename_terms))
-        prompt_lines.append("")
-    prompt_lines.extend([
-        "Return ONLY valid JSON with:",
-        "1. 'is_agriculture_related': true or false",
-        "2. 'agriculture_confidence': confidence 0.0-1.0 for agriculture relevance",
-        "3. 'subcategory': the key of the best matching video subcategory if agriculture-related, otherwise null",
-        "4. 'confidence': subtype confidence 0.0-1.0",
-        "5. 'rationale': brief explanation citing transcript or visual evidence",
-        "6. 'matched_signals': short list of supporting cues",
-        "7. 'conflicting_signals': short list of ambiguity signals",
-        "8. 'closest_alternative': the next most plausible video subcategory key",
-        "9. 'probs': object with probability for EACH video subcategory",
-    ])
-    return "\n".join(prompt_lines)
-
-
-VIDEO_SYSTEM_PROMPT = build_video_subcategory_prompt()
+    return _build_unified_schema("Audio")
 
 
 def build_video_schema() -> str:
-    probs_template = "\n".join([f'    "{k}": 0.0,' for k in VIDEO_TYPES])
-    return f"""Return ONLY valid JSON:
-{{
-  "is_agriculture_related": true,
-  "agriculture_confidence": 0.0,
-  "subcategory": "one_of_the_video_keys_below_or_null",
-  "confidence": 0.0,
-  "rationale": "explanation with evidence",
-  "matched_signals": ["signal_1", "signal_2"],
-  "conflicting_signals": ["signal_1"],
-  "closest_alternative": "one_of_the_video_keys_below",
-  "probs": {{
-{probs_template}
-  }}
-}}
-
-Available video subcategory keys:
-""" + "\n".join([f"- {k}" for k in VIDEO_TYPES])
+    return _build_unified_schema("Video", include_agriculture_gate=True)
 
 
 @dataclass
@@ -336,40 +205,19 @@ class SubcategoryLlmResult:
 
 
 def normalize_subcategory_probs(probs: Dict[str, float]) -> Dict[str, float]:
-    """Normalize probabilities to sum to 1.0."""
-    # Ensure all keys exist
-    out = {k: float(probs.get(k, 0.0)) for k in SUBCAT_TYPES}
-    
-    s = sum(out.values())
-    if s <= 0:
-        # Uniform fallback
-        return {k: 1.0 / len(SUBCAT_TYPES) for k in SUBCAT_TYPES}
-    
-    return {k: round(v / s, 4) for k, v in out.items()}
+    return _normalize_probs_for_category(probs, "Document")
 
 
 def normalize_dataset_probs(probs: Dict[str, float]) -> Dict[str, float]:
-    out = {k: float(probs.get(k, 0.0)) for k in DATASET_TYPES}
-    s = sum(out.values())
-    if s <= 0:
-        return {k: 1.0 / len(DATASET_TYPES) for k in DATASET_TYPES}
-    return {k: round(v / s, 4) for k, v in out.items()}
+    return _normalize_probs_for_category(probs, "Dataset")
 
 
 def normalize_audio_probs(probs: Dict[str, float]) -> Dict[str, float]:
-    out = {k: float(probs.get(k, 0.0)) for k in AUDIO_TYPES}
-    s = sum(out.values())
-    if s <= 0:
-        return {k: 1.0 / len(AUDIO_TYPES) for k in AUDIO_TYPES}
-    return {k: round(v / s, 4) for k, v in out.items()}
+    return _normalize_probs_for_category(probs, "Audio")
 
 
 def normalize_video_probs(probs: Dict[str, float]) -> Dict[str, float]:
-    out = {k: float(probs.get(k, 0.0)) for k in VIDEO_TYPES}
-    s = sum(out.values())
-    if s <= 0:
-        return {k: 1.0 / len(VIDEO_TYPES) for k in VIDEO_TYPES}
-    return {k: round(v / s, 4) for k, v in out.items()}
+    return _normalize_probs_for_category(probs, "Video")
 
 
 def llm_classify_subcategories_text(
@@ -434,18 +282,18 @@ def llm_classify_subcategories_text(
     
     # Extract and normalize
     subcat_key = data.get("subcategory", "")
-    if subcat_key not in SUBCATEGORIES:
+    if subcat_key not in DOCUMENT_UNIFIED_KEYS:
         # Try to find closest match or use highest prob
         probs = data.get("probs", {})
-        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else SUBCAT_TYPES[0]
+        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else DOCUMENT_UNIFIED_KEYS[0]
     
-    subcat_def = SUBCATEGORIES[subcat_key]
+    subcat_def = load_unified_subtypes()[subcat_key]
     probs = normalize_subcategory_probs(data.get("probs", {}))
     
     return SubcategoryLlmResult(
         subcategory_key=subcat_key,
         subcategory_name=subcat_def.name,
-        parent_type=subcat_def.parent_type.value,
+        parent_type="unified",
         confidence=float(data.get("confidence", probs.get(subcat_key, 0))),
         rationale=str(data.get("rationale", "")).strip(),
         probs=probs,
@@ -494,17 +342,17 @@ def llm_classify_dataset_subcategories_text(
             raise ValueError(f"Could not parse dataset LLM response: {raw[:200]}")
 
     subcat_key = data.get("subcategory", "")
-    if subcat_key not in DATASET_SUBTYPES:
+    if subcat_key not in DATASET_UNIFIED_KEYS:
         probs = data.get("probs", {})
-        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else DATASET_TYPES[0]
+        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else DATASET_UNIFIED_KEYS[0]
 
-    subtype = DATASET_SUBTYPES[subcat_key]
+    subtype = load_unified_subtypes()[subcat_key]
     probs = normalize_dataset_probs(data.get("probs", {}))
 
     return SubcategoryLlmResult(
         subcategory_key=subcat_key,
         subcategory_name=subtype.name,
-        parent_type="dataset",
+        parent_type="unified",
         confidence=float(data.get("confidence", probs.get(subcat_key, 0))),
         rationale=str(data.get("rationale", "")).strip(),
         probs=probs,
@@ -556,12 +404,7 @@ def llm_classify_image_with_vision(
         else:
             raise ValueError(f"Could not parse image VLM response: {raw[:200]}")
 
-    probs = {k: float(data.get("probs", {}).get(k, 0.0)) for k in IMAGE_TYPES}
-    total = sum(probs.values())
-    if total > 0:
-        probs = {k: round(v / total, 4) for k, v in probs.items()}
-    else:
-        probs = {k: round(1.0 / len(IMAGE_TYPES), 4) for k in IMAGE_TYPES}
+    probs = _normalize_probs_for_category(data.get("probs", {}), "Image")
     data["probs"] = probs
     return data
 
@@ -607,17 +450,17 @@ def llm_classify_audio_subcategories_text(
             raise ValueError(f"Could not parse audio LLM response: {raw[:200]}")
 
     subcat_key = data.get("subcategory", "")
-    if subcat_key not in AUDIO_SUBTYPES:
+    if subcat_key not in AUDIO_UNIFIED_KEYS:
         probs = data.get("probs", {})
-        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else AUDIO_TYPES[0]
+        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else AUDIO_UNIFIED_KEYS[0]
 
-    subtype = AUDIO_SUBTYPES[subcat_key]
+    subtype = load_unified_subtypes()[subcat_key]
     probs = normalize_audio_probs(data.get("probs", {}))
 
     return SubcategoryLlmResult(
         subcategory_key=subcat_key,
         subcategory_name=subtype.name,
-        parent_type="audio",
+        parent_type="unified",
         confidence=float(data.get("confidence", probs.get(subcat_key, 0))),
         rationale=str(data.get("rationale", "")).strip(),
         probs=probs,
@@ -666,17 +509,17 @@ def llm_classify_video_subcategories_text(
             raise ValueError(f"Could not parse video-text LLM response: {raw[:200]}")
 
     subcat_key = data.get("subcategory", "")
-    if subcat_key not in VIDEO_SUBTYPES:
+    if subcat_key not in VIDEO_UNIFIED_KEYS:
         probs = data.get("probs", {})
-        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else VIDEO_TYPES[0]
+        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else VIDEO_UNIFIED_KEYS[0]
 
-    subtype = VIDEO_SUBTYPES[subcat_key]
+    subtype = load_unified_subtypes()[subcat_key]
     probs = normalize_video_probs(data.get("probs", {}))
 
     return SubcategoryLlmResult(
         subcategory_key=subcat_key,
         subcategory_name=subtype.name,
-        parent_type="video",
+        parent_type="unified",
         confidence=float(data.get("confidence", probs.get(subcat_key, 0))),
         rationale=str(data.get("rationale", "")).strip(),
         probs=probs,
@@ -833,17 +676,17 @@ def llm_classify_subcategories_vision_batch(
     
     # Extract results
     subcat_key = data.get("subcategory", "")
-    if subcat_key not in SUBCATEGORIES:
+    if subcat_key not in DOCUMENT_UNIFIED_KEYS:
         probs = data.get("probs", {})
-        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else SUBCAT_TYPES[0]
+        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else DOCUMENT_UNIFIED_KEYS[0]
     
-    subcat_def = SUBCATEGORIES[subcat_key]
+    subcat_def = load_unified_subtypes()[subcat_key]
     probs = normalize_subcategory_probs(data.get("probs", {}))
     
     return SubcategoryLlmResult(
         subcategory_key=subcat_key,
         subcategory_name=subcat_def.name,
-        parent_type=subcat_def.parent_type.value,
+        parent_type="unified",
         confidence=float(data.get("confidence", probs.get(subcat_key, 0))),
         rationale=str(data.get("rationale", "")).strip(),
         probs=probs,

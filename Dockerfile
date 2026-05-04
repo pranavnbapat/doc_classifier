@@ -66,6 +66,7 @@ RUN --mount=type=cache,target=/app/.cache/huggingface \
 COPY app.py .
 COPY docint/ ./docint/
 COPY data_model/ ./data_model/
+COPY visualisations/ ./visualisations/
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser \
