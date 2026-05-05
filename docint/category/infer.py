@@ -60,6 +60,8 @@ def infer_file_category(asset: IngestedAsset, upload_content_type: str | None = 
     if mime in {
         "text/csv",
         "text/tab-separated-values",
+        "application/json",
+        "text/json",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.ms-excel",
     }:
@@ -173,11 +175,11 @@ def infer_category(asset: IngestedAsset) -> CategoryInferenceResult:
             rationale=f"Video file type .{asset.asset_type} is routed as Video",
         )
 
-    if asset.asset_type in {"csv", "tsv"}:
+    if asset.asset_type in {"csv", "tsv", "json"}:
         return CategoryInferenceResult(
             category="Dataset",
             confidence=0.98,
-            rationale=f"Delimited tabular file .{asset.asset_type} is routed as Dataset",
+            rationale=f"Structured dataset file .{asset.asset_type} is routed as Dataset",
         )
 
     if asset.asset_type == "xlsx":

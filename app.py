@@ -85,7 +85,7 @@ VISUALISATIONS_DIR = os.path.join(BASE_DIR, "visualisations")
 
 SUPPORTED_FILE_TYPES_BY_CATEGORY: Dict[str, List[str]] = {
     "Document": [".pdf", ".txt", ".docx", ".pptx"],
-    "Dataset": [".csv", ".tsv", ".xlsx"],
+    "Dataset": [".csv", ".tsv", ".xlsx", ".json"],
     "Image": [".jpg", ".jpeg", ".png"],
     "Audio": [".mp3", ".wav", ".m4a"],
     "Video": [".mp4", ".avi", ".mov", ".wmv", ".mpeg", ".mpg", ".mkv", ".flv", ".webm", ".3gp", ".mts", ".m2ts", ".vob", ".rmvb"],
@@ -358,7 +358,7 @@ app = FastAPI(
     ## File Type Coverage
 
     * Document: 4 upload types (`.pdf`, `.txt`, `.docx`, `.pptx`)
-    * Dataset: 3 upload types (`.csv`, `.tsv`, `.xlsx`)
+    * Dataset: 4 upload types (`.csv`, `.tsv`, `.xlsx`, `.json`)
     * Image: 3 upload types (`.jpg`, `.jpeg`, `.png`)
     * Audio: 3 upload types (`.mp3`, `.wav`, `.m4a`)
     * Video: 14 upload types

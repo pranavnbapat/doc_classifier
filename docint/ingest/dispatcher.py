@@ -8,11 +8,11 @@ from docint.ingest.image import ingest_image
 from docint.ingest.models import IngestedAsset
 from docint.ingest.pdf import ingest_pdf
 from docint.ingest.pptx import ingest_pptx
-from docint.ingest.tabular import ingest_delimited_file, ingest_xlsx
+from docint.ingest.tabular import ingest_delimited_file, ingest_json, ingest_xlsx
 from docint.ingest.text import ingest_text_file
 from docint.ingest.video import ingest_video
 
-SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".docx", ".pptx", ".csv", ".tsv", ".xlsx", ".jpg", ".jpeg", ".png", ".mp3", ".wav", ".m4a", ".mp4", ".avi", ".mov", ".wmv", ".mpeg", ".mpg", ".mkv", ".flv", ".webm", ".3gp", ".mts", ".m2ts", ".vob", ".rmvb"}
+SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".docx", ".pptx", ".csv", ".tsv", ".xlsx", ".json", ".jpg", ".jpeg", ".png", ".mp3", ".wav", ".m4a", ".mp4", ".avi", ".mov", ".wmv", ".mpeg", ".mpg", ".mkv", ".flv", ".webm", ".3gp", ".mts", ".m2ts", ".vob", ".rmvb"}
 
 
 def ingest_asset(file_path: str, filename: str) -> IngestedAsset:
@@ -32,6 +32,8 @@ def ingest_asset(file_path: str, filename: str) -> IngestedAsset:
         return ingest_delimited_file(file_path, filename, "\t")
     if suffix == ".xlsx":
         return ingest_xlsx(file_path, filename)
+    if suffix == ".json":
+        return ingest_json(file_path, filename)
     if suffix in {".jpg", ".jpeg"}:
         return ingest_image(file_path, filename, "image/jpeg")
     if suffix == ".png":
