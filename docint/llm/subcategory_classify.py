@@ -164,12 +164,14 @@ DATASET_UNIFIED_KEYS = _category_keys("Dataset")
 IMAGE_UNIFIED_KEYS = _category_keys("Image")
 AUDIO_UNIFIED_KEYS = _category_keys("Audio")
 VIDEO_UNIFIED_KEYS = _category_keys("Video")
+SOFTWARE_UNIFIED_KEYS = _category_keys("Software Application")
 
 SYSTEM_PROMPT = _build_unified_category_prompt("Document")
 DATASET_SYSTEM_PROMPT = _build_unified_category_prompt("Dataset")
 IMAGE_SYSTEM_PROMPT = _build_unified_category_prompt("Image", include_agriculture_gate=True)
 AUDIO_SYSTEM_PROMPT = _build_unified_category_prompt("Audio")
 VIDEO_SYSTEM_PROMPT = _build_unified_category_prompt("Video", include_agriculture_gate=True, include_visual_evidence=True)
+SOFTWARE_SYSTEM_PROMPT = _build_unified_category_prompt("Software Application")
 
 
 def build_schema() -> str:
@@ -190,6 +192,10 @@ def build_audio_schema() -> str:
 
 def build_video_schema() -> str:
     return _build_unified_schema("Video", include_agriculture_gate=True)
+
+
+def build_software_schema() -> str:
+    return _build_unified_schema("Software Application")
 
 
 @dataclass
@@ -218,6 +224,10 @@ def normalize_audio_probs(probs: Dict[str, float]) -> Dict[str, float]:
 
 def normalize_video_probs(probs: Dict[str, float]) -> Dict[str, float]:
     return _normalize_probs_for_category(probs, "Video")
+
+
+def normalize_software_probs(probs: Dict[str, float]) -> Dict[str, float]:
+    return _normalize_probs_for_category(probs, "Software Application")
 
 
 def llm_classify_subcategories_text(
@@ -348,6 +358,65 @@ def llm_classify_dataset_subcategories_text(
 
     subtype = load_unified_subtypes()[subcat_key]
     probs = normalize_dataset_probs(data.get("probs", {}))
+
+    return SubcategoryLlmResult(
+        subcategory_key=subcat_key,
+        subcategory_name=subtype.name,
+        parent_type="unified",
+        confidence=float(data.get("confidence", probs.get(subcat_key, 0))),
+        rationale=str(data.get("rationale", "")).strip(),
+        probs=probs,
+        raw_json=data,
+    )
+
+
+def llm_classify_software_subcategories_text(
+    text: str,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    max_chars: int = 12000,
+    temperature: float = 0.2,
+    timeout: float = 60.0,
+) -> SubcategoryLlmResult:
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+
+    if len(text) > max_chars:
+        head_len = int(max_chars * 0.75)
+        tail_len = int(max_chars * 0.25)
+        text = text[:head_len] + "\n\n[...TRUNCATED...]\n\n" + text[-tail_len:]
+
+    schema = build_software_schema()
+    messages = [
+        {"role": "system", "content": SOFTWARE_SYSTEM_PROMPT},
+        {"role": "user", "content": schema + "\n\nSOFTWARE OR TOOL DESCRIPTION:\n" + text},
+    ]
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+
+    raw = resp.choices[0].message.content or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            data = json.loads(raw[start:end + 1])
+        else:
+            raise ValueError(f"Could not parse software LLM response: {raw[:200]}")
+
+    subcat_key = data.get("subcategory", "")
+    if subcat_key not in SOFTWARE_UNIFIED_KEYS:
+        probs = data.get("probs", {})
+        subcat_key = max(probs.items(), key=lambda x: x[1])[0] if probs else SOFTWARE_UNIFIED_KEYS[0]
+
+    subtype = load_unified_subtypes()[subcat_key]
+    probs = normalize_software_probs(data.get("probs", {}))
 
     return SubcategoryLlmResult(
         subcategory_key=subcat_key,

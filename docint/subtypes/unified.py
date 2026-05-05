@@ -11,6 +11,7 @@ from docint.rubrics.subcategory_scorer import FeatureEvidence, SubcategoryScore
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+V5_MODEL_PATH = BASE_DIR / "data_model" / "generated" / "v5" / "subcategories_v5_full_model.json"
 MERGED_MODEL_PATH = BASE_DIR / "data_model" / "generated" / "v4_improved" / "cross_modal_feature_model_v4.json"
 FALLBACK_MODEL_PATH = BASE_DIR / "data_model" / "generated" / "v4" / "subcategory_model_v4.json"
 
@@ -125,7 +126,148 @@ LEGACY_TO_UNIFIED: Dict[str, str] = {
 
 
 def _resolve_model_path() -> Path:
+    if V5_MODEL_PATH.exists():
+        return V5_MODEL_PATH
     return MERGED_MODEL_PATH if MERGED_MODEL_PATH.exists() else FALLBACK_MODEL_PATH
+
+
+def _split_indicator_text(text: str) -> List[str]:
+    if not text:
+        return []
+    return [
+        item.strip(" .:-")
+        for item in re.split(r"[;,]+", text)
+        if item.strip(" .:-")
+    ]
+
+
+def _normalize_runtime_category(category: str) -> str:
+    if category == "Software Application":
+        return "Software"
+    return category
+
+
+def _strength_rank(strength: str) -> int:
+    order = {"Strong": 3, "Partial": 2, "Weak/Partial": 1}
+    return order.get(strength, 0)
+
+
+def _strength_to_relation(strength: str, *, is_first: bool) -> str:
+    if strength == "Strong" and is_first:
+        return "primary"
+    return "related"
+
+
+def _build_feature_groups_from_v5_profile(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    groups: List[Dict[str, Any]] = []
+    dominant_rule = str(profile.get("dominant_rule", ""))
+    dominant_feature = ""
+    match = re.search(r"Must:\s*([a-zA-Z0-9_]+)", dominant_rule)
+    if match:
+        dominant_feature = match.group(1)
+
+    for item in profile.get("feature_catalog_matches", []):
+        feature_id = str(item.get("feature_id", "")).strip()
+        if not feature_id:
+            continue
+        positive_indicators: List[str] = []
+        positive_indicators.extend(_split_indicator_text(item.get("definition", "")))
+        positive_indicators.extend(_termify(feature_id))
+        positive_indicators.extend(_termify(profile.get("name", "")))
+        examples = profile.get("examples", "")
+        if isinstance(examples, str):
+            positive_indicators.extend(_termify(examples))
+        weight = 1.0 if feature_id == dominant_feature else 0.78
+        groups.append(
+            {
+                "feature_id": feature_id,
+                "weight": weight,
+                "definition": item.get("definition", ""),
+                "measurement": dominant_rule if feature_id == dominant_feature and dominant_rule else f"Detect evidence for {feature_id}",
+                "positive_indicators": list(dict.fromkeys([v for v in positive_indicators if v]))[:12],
+                "negative_indicators": [],
+            }
+        )
+
+    if not groups and profile.get("key_features_text"):
+        indicators = _split_indicator_text(str(profile.get("key_features_text", "")))
+        if indicators:
+            groups.append(
+                {
+                    "feature_id": f"{profile.get('id', 'profile')}_key_features",
+                    "weight": 0.82,
+                    "definition": str(profile.get("key_features_text", "")),
+                    "measurement": dominant_rule or "Detect document key-feature evidence",
+                    "positive_indicators": indicators[:12],
+                    "negative_indicators": [],
+                }
+            )
+    return groups
+
+
+def _runtime_payload_from_v5(payload: Dict[str, Any]) -> Dict[str, Any]:
+    unified_subcategories = []
+    categories: Dict[str, Dict[str, Any]] = {}
+
+    for item in payload.get("unified_subcategories", []):
+        unified_subcategories.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "definition": item.get("definition", ""),
+                "scope_note": item.get("scope_note", ""),
+                "user_label": item.get("user_label", ""),
+                "detailed_features": item.get("feature_basis", []),
+                "mapped_from_legacy": [],
+                "applicability_hints": [
+                    _normalize_runtime_category(value)
+                    for value in item.get("applicable_categories", [])
+                ],
+                "imports_from_profiles": [
+                    {
+                        "source_profile_id": source.get("profile_id"),
+                        "source_profile_name": source.get("profile_name"),
+                        "source_modality": source.get("modality"),
+                        "relation": "primary" if source.get("strength") == "Strong" else "related",
+                        "why": source.get("rationale", ""),
+                    }
+                    for source in item.get("source_profiles", [])
+                ],
+            }
+        )
+
+    for category_name, category_payload in payload.get("source_modalities", {}).items():
+        runtime_category = _normalize_runtime_category(category_name)
+        profiles: List[Dict[str, Any]] = []
+        for profile in category_payload.get("profiles", []):
+            mappings = list(profile.get("unified_mappings", []))
+            mappings.sort(key=lambda row: _strength_rank(str(row.get("strength", ""))), reverse=True)
+            imports_to_unified = [
+                {
+                    "unified_subcategory_id": mapping.get("unified_subcategory_id"),
+                    "relation": _strength_to_relation(str(mapping.get("strength", "")), is_first=index == 0),
+                    "why": f"{mapping.get('unified_subcategory_name', '')} via {mapping.get('strength', '')} mapping from v5 exhaustive model.",
+                    "strength": mapping.get("strength"),
+                }
+                for index, mapping in enumerate(mappings)
+            ]
+            profiles.append(
+                {
+                    "id": profile.get("id"),
+                    "name": profile.get("name"),
+                    "definition": profile.get("definition", ""),
+                    "scope_note": profile.get("scope_note", ""),
+                    "examples": profile.get("examples", ""),
+                    "feature_groups": _build_feature_groups_from_v5_profile(profile),
+                    "imports_to_unified": imports_to_unified,
+                }
+            )
+        categories[runtime_category] = {"profiles": profiles}
+
+    return {
+        "unified_subcategories": unified_subcategories,
+        "categories": categories,
+    }
 
 
 def _termify(text: str) -> List[str]:
@@ -157,11 +299,16 @@ def _termify(text: str) -> List[str]:
     }
     terms: List[str] = []
     for part in parts:
-        if len(part) < 4:
-            continue
-        if part in stop_terms:
-            continue
-        terms.append(part)
+        tokens = [part]
+        if " " in part or "-" in part:
+            tokens.extend(re.split(r"[\s-]+", part))
+        for token in tokens:
+            token = token.strip(" .:-")
+            if len(token) < 4:
+                continue
+            if token in stop_terms:
+                continue
+            terms.append(token)
     return list(dict.fromkeys(terms))
 
 
@@ -180,6 +327,140 @@ def _match_terms(text_lower: str, terms: List[str], *, per_hit_weight: float) ->
     return min(1.0, len(hits) * per_hit_weight), hits[:12]
 
 
+def _extract_prefixed_values(text: str, prefixes: Tuple[str, ...]) -> List[str]:
+    values: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        lower = line.lower()
+        for prefix in prefixes:
+            if lower.startswith(prefix):
+                _, _, rest = line.partition(":")
+                if rest:
+                    values.extend([part.strip().lower() for part in rest.split("|") if part.strip()])
+                break
+    return list(dict.fromkeys(values))
+
+
+def _extract_dataset_context(text: str, filename: str) -> Dict[str, Any]:
+    columns = _extract_prefixed_values(text, ("columns",))
+    row_values = _extract_prefixed_values(text, tuple(f"row {idx}" for idx in range(0, 31)))
+    text_lower = f"{filename}\n{text}".lower()
+    return {
+        "text_lower": text_lower,
+        "columns": columns,
+        "row_values": row_values[:120],
+        "has_tabular_preview": bool(columns),
+        "sheet_mentions": text_lower.count("sheet:"),
+        "row_mentions": len(re.findall(r"(?m)^row\s+\d+:", text_lower)),
+    }
+
+
+def _score_dataset_signal(context: Dict[str, Any], feature_id: str) -> tuple[float, List[str]]:
+    text_lower = context["text_lower"]
+    columns = context["columns"]
+    row_values = context["row_values"]
+    header_space = " ".join(columns)
+
+    def _hits(terms: List[str], *, in_columns_weight: float = 0.26, in_text_weight: float = 0.14) -> tuple[float, List[str]]:
+        hits: List[str] = []
+        score = 0.0
+        for term in terms:
+            matched = False
+            if any(term == col or term in col for col in columns):
+                hits.append(term)
+                score += in_columns_weight
+                matched = True
+            elif term in header_space or term in " ".join(row_values):
+                hits.append(term)
+                score += in_text_weight
+                matched = True
+            elif " " in term and term in text_lower:
+                hits.append(term)
+                score += in_text_weight
+                matched = True
+            elif re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text_lower):
+                hits.append(term)
+                score += in_text_weight
+                matched = True
+            if matched and len(hits) >= 10:
+                break
+        return min(1.0, score), hits
+
+    signals: Dict[str, List[str]] = {
+        "entity_focus": ["field", "plot", "farm", "parcel", "crop", "animal", "livestock", "soil", "water", "orchard", "block_id", "field_id"],
+        "event_log_structure": ["event", "activity", "operation", "task", "schedule", "start_time", "end_time", "status", "operator", "performed_by"],
+        "input_application_records": ["fertilizer", "fertiliser", "pesticide", "herbicide", "fungicide", "seed", "dose", "rate", "application", "input"],
+        "output_measurement_structure": ["yield", "production", "harvest", "output", "quantity", "weight", "biomass", "tons", "kg", "productivity"],
+        "temporal_series_structure": ["date", "time", "timestamp", "datetime", "day", "month", "year", "hour", "minute", "daily", "hourly"],
+        "spatial_geometry_structure": ["latitude", "longitude", "lat", "lon", "lng", "geometry", "geojson", "polygon", "wkt", "epsg", "bbox", "x", "y"],
+        "derived_aggregation_structure": ["average", "mean", "median", "sum", "total", "index", "score", "kpi", "aggregated", "forecast", "estimate", "derived"],
+        "social_survey_structure": ["survey", "respondent", "questionnaire", "likert", "demographic", "gender", "age", "household", "attitude", "response"],
+        "machine_telemetry_structure": ["sensor", "telemetry", "tractor", "machine", "equipment", "engine", "rpm", "fuel", "speed", "canbus", "gps", "implement"],
+    }
+
+    terms = signals.get(feature_id, [])
+    score, hits = _hits(terms)
+
+    if feature_id == "event_log_structure":
+        if context["row_mentions"] >= 3 and any(term in text_lower for term in ("operation", "event", "activity", "task")):
+            score = min(1.0, score + 0.18)
+    elif feature_id == "temporal_series_structure":
+        if context["row_mentions"] >= 3 and any(term in columns for term in ("date", "time", "timestamp")):
+            score = min(1.0, score + 0.2)
+    elif feature_id == "spatial_geometry_structure":
+        if any(term in columns for term in ("lat", "lon", "lng", "geometry", "wkt", "epsg")):
+            score = min(1.0, score + 0.22)
+    elif feature_id == "derived_aggregation_structure":
+        if any(term in text_lower for term in ("average", "forecast", "index", "score", "aggregated")):
+            score = min(1.0, score + 0.14)
+
+    if context["has_tabular_preview"] and feature_id in signals:
+        score = min(1.0, score + 0.08)
+
+    return score, hits[:10]
+
+
+def _score_software_signal(text: str, filename: str, feature_id: str) -> tuple[float, List[str]]:
+    text_lower = f"{filename}\n{text}".lower()
+    signals: Dict[str, List[str]] = {
+        "workflow_role_and_scope": ["workflow", "planning", "records", "manage", "management", "operations", "module", "user", "platform", "dashboard"],
+        "integration_and_interoperability_connectivity": ["api", "integration", "interoperability", "connector", "sync", "import", "export", "plugin", "webhook"],
+        "temporal_recording_orientation": ["track", "tracking", "record", "logging", "history", "timeline", "over time", "time series", "monitor"],
+        "input_modality_and_capture_mode": ["mobile", "tablet", "offline", "form", "capture", "camera", "gps", "scan", "entry", "input"],
+        "field_capture_and_observation_structure": ["field", "scouting", "inspection", "observation", "geo-tagged", "in-field", "capture", "survey in field"],
+        "spatial_interaction_and_georeferenced_analysis": ["map", "mapping", "gis", "geospatial", "parcel", "layer", "location", "georeferenced", "spatial"],
+        "analysis_visualisation_and_insight_generation": ["analysis", "analytics", "dashboard", "visualisation", "insight", "kpi", "reporting", "chart"],
+        "model_prediction_and_scenario_logic": ["simulate", "simulation", "forecast", "prediction", "scenario", "optimisation", "model"],
+        "automation_control_and_triggering": ["automation", "automatic", "control", "trigger", "alert", "schedule action", "irrigation control", "actuator"],
+        "learning_mechanics_and_training_design": ["training", "learning", "lesson", "quiz", "tutorial", "guided", "practice", "assessment"],
+    }
+
+    terms = signals.get(feature_id, [])
+    score, hits = _match_terms(text_lower, terms, per_hit_weight=0.18)
+
+    if feature_id == "workflow_role_and_scope" and any(term in text_lower for term in ("platform", "dashboard", "management")):
+        score = min(1.0, score + 0.16)
+    elif feature_id == "integration_and_interoperability_connectivity" and any(term in text_lower for term in ("api", "integration", "import", "export")):
+        score = min(1.0, score + 0.16)
+    elif feature_id == "field_capture_and_observation_structure" and any(term in text_lower for term in ("mobile app", "field app", "scouting")):
+        score = min(1.0, score + 0.14)
+    elif feature_id == "analysis_visualisation_and_insight_generation" and any(term in text_lower for term in ("dashboard", "chart", "analytics")):
+        score = min(1.0, score + 0.14)
+    elif feature_id == "automation_control_and_triggering" and any(term in text_lower for term in ("control", "automation", "alert")):
+        score = min(1.0, score + 0.14)
+
+    return score, hits[:10]
+
+
+def _feature_specific_signal(text: str, filename: str, category: str, feature_id: str) -> tuple[float, List[str]]:
+    runtime_category = _normalize_runtime_category(category)
+    if runtime_category == "Dataset":
+        return _score_dataset_signal(_extract_dataset_context(text, filename), feature_id)
+    if runtime_category == "Software":
+        return _score_software_signal(text, filename, feature_id)
+    return 0.0, []
+
+
 def _profile_name_terms(profile: Dict[str, Any]) -> List[str]:
     terms: List[str] = []
     for key in ("name", "definition", "scope_note"):
@@ -191,7 +472,10 @@ def _profile_name_terms(profile: Dict[str, Any]) -> List[str]:
 
 @lru_cache(maxsize=1)
 def load_cross_modal_feature_model() -> Dict[str, Any]:
-    return json.loads(_resolve_model_path().read_text(encoding="utf-8"))
+    payload = json.loads(_resolve_model_path().read_text(encoding="utf-8"))
+    if payload.get("model_version") == "v5" and "source_modalities" in payload:
+        return _runtime_payload_from_v5(payload)
+    return payload
 
 
 @lru_cache(maxsize=1)
@@ -230,11 +514,13 @@ def load_unified_subtypes() -> Dict[str, UnifiedSubtypeDefinition]:
 @lru_cache(maxsize=8)
 def load_category_profiles(category: str) -> List[Dict[str, Any]]:
     payload = load_cross_modal_feature_model()
+    category = _normalize_runtime_category(category)
     return list((payload.get("categories", {}).get(category) or {}).get("profiles", []))
 
 
 @lru_cache(maxsize=8)
 def allowed_unified_keys_for_category(category: str) -> Tuple[str, ...]:
+    category = _normalize_runtime_category(category)
     defs = load_unified_subtypes()
     return tuple(
         key for key, subtype in defs.items()
@@ -287,11 +573,18 @@ def map_probs_to_unified(probs: Dict[str, float]) -> Dict[str, float]:
     return aggregated
 
 
-def _score_profile_feature_group(text_lower: str, feature_group: Dict[str, Any]) -> tuple[float, float, List[str], List[str]]:
+def _score_profile_feature_group(text: str, text_lower: str, feature_group: Dict[str, Any], *, category: str, filename: str) -> tuple[float, float, List[str], List[str]]:
     weight = float(feature_group.get("weight", 0.0))
     positive_terms = [str(item).lower() for item in feature_group.get("positive_indicators", [])]
     negative_terms = [str(item).lower() for item in feature_group.get("negative_indicators", [])]
     pos_score, pos_hits = _match_terms(text_lower, positive_terms, per_hit_weight=0.22)
+    feature_id = str(feature_group.get("feature_id", "")).strip()
+    feature_score, feature_hits = _feature_specific_signal(text, filename, category, feature_id)
+    if feature_score > pos_score:
+        pos_score = feature_score
+        pos_hits = list(dict.fromkeys(feature_hits + pos_hits))[:12]
+    else:
+        pos_hits = list(dict.fromkeys(pos_hits + feature_hits))[:12]
     neg_score, neg_hits = _match_terms(text_lower, negative_terms, per_hit_weight=0.12)
     if weight >= 0:
         contribution = max(0.0, pos_score - (0.55 * neg_score)) * weight
@@ -303,6 +596,7 @@ def _score_profile_feature_group(text_lower: str, feature_group: Dict[str, Any])
 
 
 def score_intermediate_profiles(*, category: str, text: str, filename: str = "") -> List[Dict[str, Any]]:
+    category = _normalize_runtime_category(category)
     profiles = load_category_profiles(category)
     text_lower = f"{filename}\n{text}".lower()
     results: List[Dict[str, Any]] = []
@@ -319,7 +613,13 @@ def score_intermediate_profiles(*, category: str, text: str, filename: str = "")
 
         for feature_group in profile.get("feature_groups", []):
             weight = float(feature_group.get("weight", 0.0))
-            contribution, penalty, pos_hits, neg_hits = _score_profile_feature_group(text_lower, feature_group)
+            contribution, penalty, pos_hits, neg_hits = _score_profile_feature_group(
+                text,
+                text_lower,
+                feature_group,
+                category=category,
+                filename=filename,
+            )
             if weight > 0:
                 positive_weight_total += weight
                 contribution_total += contribution
@@ -351,9 +651,10 @@ def score_unified_subcategories(
     legacy_probs: Dict[str, float] | None = None,
     filename: str = "",
 ) -> List[SubcategoryScore]:
+    runtime_category = _normalize_runtime_category(category)
     defs = load_unified_subtypes()
     support_terms = load_unified_support_terms()
-    profile_scores = score_intermediate_profiles(category=category, text=text, filename=filename)
+    profile_scores = score_intermediate_profiles(category=runtime_category, text=text, filename=filename)
     profile_by_unified: Dict[str, List[Dict[str, Any]]] = {}
     for profile in profile_scores:
         for link in profile.get("imports_to_unified", []):
@@ -397,7 +698,7 @@ def score_unified_subcategories(
         profile_hits = list(dict.fromkeys(profile_hits))[:6]
 
         prior_score = float(unified_prior.get(key, 0.0))
-        applicable = not subtype.applicability_hints or category in subtype.applicability_hints
+        applicable = not subtype.applicability_hints or runtime_category in subtype.applicability_hints
         agreement_bonus = 0.08 if ((direct_score >= 0.14 and profile_score >= 0.20) or (profile_score >= 0.20 and prior_score >= 0.18)) else 0.0
 
         fused_core = max(direct_score, profile_score)
@@ -446,7 +747,7 @@ def score_unified_subcategories(
                 feature_name="category_applicability",
                 detected=applicable,
                 score=1.0 if applicable else 0.0,
-                raw_value={"category": category, "applicability_hints": list(subtype.applicability_hints)},
+                raw_value={"category": runtime_category, "applicability_hints": list(subtype.applicability_hints)},
                 excerpts=[],
             ),
         }
@@ -463,7 +764,7 @@ def score_unified_subcategories(
         if agreement_bonus > 0.0:
             rationale_bits.append("signal/profile agreement")
         if applicable and (direct_score > 0.0 or profile_score > 0.0 or prior_score > 0.0):
-            rationale_bits.append(f"applicable to {category}")
+            rationale_bits.append(f"applicable to {runtime_category}")
         rationale = "; ".join(rationale_bits) if rationale_bits else "minimal unified subtype evidence"
 
         scores.append(

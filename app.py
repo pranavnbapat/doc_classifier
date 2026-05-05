@@ -48,10 +48,6 @@ from docint.security.upload_security import (
 from docint.extract.quality import text_quality_ok
 from docint.extract.ocr import ocr_pdf, ocr_image
 from docint.category.infer import infer_category, infer_file_category, infer_url_category
-from docint.category.audio_scorer import AUDIO_SUBTYPES, score_audio_subcategories
-from docint.category.dataset_scorer import DATASET_SUBTYPES, score_dataset_subcategories
-from docint.category.image_scorer import score_image_subcategories_from_text, IMAGE_SUBTYPES
-from docint.category.video_scorer import VIDEO_SUBTYPES, score_video_subcategories
 from docint.ingest.dispatcher import ingest_asset, SUPPORTED_DOCUMENT_EXTENSIONS
 from docint.ingest.unit_limits import inspect_document_units
 from docint.video.extract import media_duration_seconds, sample_video_frames, transcribe_video_audio
@@ -86,6 +82,20 @@ from docint.fusion.intelligent_fusion import (
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VISUALISATIONS_DIR = os.path.join(BASE_DIR, "visualisations")
+
+SUPPORTED_FILE_TYPES_BY_CATEGORY: Dict[str, List[str]] = {
+    "Document": [".pdf", ".txt", ".docx", ".pptx"],
+    "Dataset": [".csv", ".tsv", ".xlsx"],
+    "Image": [".jpg", ".jpeg", ".png"],
+    "Audio": [".mp3", ".wav", ".m4a"],
+    "Video": [".mp4", ".avi", ".mov", ".wmv", ".mpeg", ".mpg", ".mkv", ".flv", ".webm", ".3gp", ".mts", ".m2ts", ".vob", ".rmvb"],
+    "Software Application": [],
+}
+
+URL_SUFFIX_HINTS_BY_CATEGORY: Dict[str, List[str]] = {
+    "Document": [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".txt"],
+    "Dataset": [".csv", ".tsv", ".xlsx", ".xls", ".json"],
+}
 
 # =============================================================================
 # CONFIGURATION
@@ -344,6 +354,15 @@ app = FastAPI(
     ## Visualisations
 
     * Subcategory graph: `/visualisations/subcategories_graph.html`
+
+    ## File Type Coverage
+
+    * Document: 4 upload types (`.pdf`, `.txt`, `.docx`, `.pptx`)
+    * Dataset: 3 upload types (`.csv`, `.tsv`, `.xlsx`)
+    * Image: 3 upload types (`.jpg`, `.jpeg`, `.png`)
+    * Audio: 3 upload types (`.mp3`, `.wav`, `.m4a`)
+    * Video: 14 upload types
+    * Software Application: no dedicated upload file types; primarily inferred from URL content
     """,
     version="2.0.0",
     docs_url="/docs",  # Enable docs - they'll be protected by middleware
@@ -1228,31 +1247,136 @@ def classify_url_text(
         )
 
     if category_result.category == "Software Application":
+        stage_start = time.time()
+        software_candidates, software_best = _build_unified_candidates(
+            category=category_result.category,
+            text=text,
+            filename=url,
+            legacy_probs={},
+        )
+        software_heuristics_best = software_best.model_copy(deep=True) if software_best else None
+        stage_timings_ms["software_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
+        software_text_result = None
+        software_text_source = None
+        software_fusion = None
+
+        should_use_software_text_llm = (
+            use_text_llm
+            and LLM_CONFIGURED
+            and (
+                non_english_llm_primary
+                or software_best is None
+                or software_best.confidence < classification_confidence_threshold
+                or _top_probability_gap(software_candidates) < TEXT_LLM_GAP_THRESHOLD
+            )
+        )
+
+        if should_use_software_text_llm:
+            stage_start = time.time()
+            try:
+                from docint.llm.subcategory_classify import llm_classify_software_subcategories_text
+
+                llm_res = llm_classify_software_subcategories_text(
+                    _sample_text_for_llm(text, max_chars=URL_TEXT_LLM_MAX_CHARS),
+                    base_url=LLM_BASE_URL,
+                    api_key=LLM_API_KEY,
+                    model=LLM_MODEL,
+                    max_chars=URL_TEXT_LLM_MAX_CHARS,
+                    temperature=0.2,
+                )
+                software_text_source = convert_to_source_result(
+                    subcategory_key=llm_res.subcategory_key,
+                    confidence=llm_res.confidence,
+                    probs=llm_res.probs,
+                    source_name="text_llm",
+                    rationale=llm_res.rationale,
+                )
+                software_text_result = {
+                    "subcategory_key": llm_res.subcategory_key,
+                    "subcategory_name": llm_res.subcategory_name,
+                    "confidence": round(llm_res.confidence, 4),
+                    "rationale": llm_res.rationale,
+                    "model": LLM_MODEL,
+                    "probs": llm_res.probs,
+                }
+            except Exception as e:
+                software_text_result = {"error": str(e), "model": LLM_MODEL}
+            stage_timings_ms["software_text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
+
+        if non_english_llm_primary and software_text_source:
+            _apply_source_probabilities(software_candidates, software_text_source.probs, _unified_key_by_name())
+            add_contrastive_rationales(software_candidates)
+            software_best = software_candidates[0] if software_candidates else None
+        elif software_best and software_text_source:
+            software_heuristics_source = convert_to_source_result(
+                subcategory_key=software_best.subcategory_id,
+                confidence=software_best.confidence,
+                probs={candidate.subcategory_id: candidate.probability for candidate in software_candidates},
+                source_name="heuristics",
+                evidence_score=software_best.evidence_score,
+                rationale=software_best.rationale,
+            )
+            software_alpha = 0.34 if len(text) >= 500 else 0.26
+            fusion_result = intelligent_fusion(
+                heuristics_result=software_heuristics_source,
+                vision_result=None,
+                text_result=software_text_source,
+                strategy=FusionStrategy.CONFIDENCE_ADAPTIVE if fusion_strategy == "adaptive" else FusionStrategy.WEIGHTED,
+                heuristics_alpha=software_alpha,
+                llm_alpha=1.0 - software_alpha,
+            )
+            software_fusion = FusionInfo(
+                fused=True,
+                strategy=fusion_result.fusion_strategy,
+                weights=fusion_result.weights,
+                agreement_score=fusion_result.agreement_score,
+                rationale=fusion_result.rationale,
+            )
+            for candidate in software_candidates:
+                fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
+                candidate.probability = fused_prob
+                candidate.confidence = fused_prob
+            software_candidates.sort(key=lambda item: item.probability, reverse=True)
+            for idx, candidate in enumerate(software_candidates, start=1):
+                candidate.rank = idx
+            add_contrastive_rationales(software_candidates)
+            software_best = software_candidates[0] if software_candidates else None
+
         processing_time_ms = (time.time() - start_time) * 1000
         return ClassificationResponse(
-            best_match=None,
-            all_candidates=[],
-            fusion=None,
-            heuristics=None,
+            best_match=software_best,
+            all_candidates=software_candidates,
+            fusion=software_fusion,
+            heuristics=software_heuristics_best,
             vision_llm=None,
-            text_llm=None,
+            text_llm=software_text_result,
             category_used=category_result.category,
             category_inference=category_response,
             agriculture_relevance=agriculture_response,
-            classification_skipped=True,
-            skip_reason="URL classified as Software Application landing-page content; subtype scoring is not enabled for this category yet",
-            total_candidates=0,
-            confidence_threshold_met=False,
+            classification_skipped=False,
+            skip_reason=None,
+            total_candidates=len(software_candidates),
+            confidence_threshold_met=bool(software_best and software_best.confidence >= classification_confidence_threshold),
             document_info=base_document_info,
             processing_info={
                 "processing_time_ms": round(processing_time_ms, 2),
                 "ocr_used": False,
-                "sources_used": [],
-                "fusion_enabled": False,
+                "sources_used": ["heuristics"] + (["text_llm"] if software_text_result is not None and "error" not in software_text_result else []),
+                "fusion_enabled": software_fusion is not None,
                 "require_agriculture": require_agriculture,
                 "auto_route_models": auto_route_models,
                 "source_mode": "url",
                 "extraction": pagesense_meta,
+                "routing": {
+                    "software_mode": True,
+                    "text_llm": {
+                        "requested": use_text_llm,
+                        "used": software_text_result is not None and "error" not in software_text_result,
+                        "reason": "software_text_llm_enabled" if should_use_software_text_llm else "heuristics_strong_enough",
+                    },
+                    "vision_llm": {"requested": False, "used": False, "reasons": ["url_text_mode_no_vision"]},
+                    "language_detection": language_info,
+                },
                 "cache": {
                     "pagesense": pagesense_meta.get("cache_hit", False),
                     "agriculture": agriculture_cache_hit,
@@ -1265,14 +1389,11 @@ def classify_url_text(
 
     if category_result.category == "Dataset":
         stage_start = time.time()
-        _, dataset_scores = score_dataset_subcategories(text, lines)
-        legacy_dataset_candidates = build_probability_distribution(dataset_scores)
-        legacy_dataset_probs = _legacy_name_probs_from_candidates(legacy_dataset_candidates)
         dataset_candidates, dataset_best = _build_unified_candidates(
             category=category_result.category,
             text=text,
             filename=url,
-            legacy_probs=legacy_dataset_probs,
+            legacy_probs={},
         )
         dataset_heuristics_best = dataset_best.model_copy(deep=True) if dataset_best else None
         stage_timings_ms["dataset_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -1759,15 +1880,11 @@ def classify_document(
 
     if category_result.category == "Image":
         stage_start = time.time()
-        _, image_scores = score_image_subcategories_from_text(asset.text, asset.lines)
-        image_candidates = build_probability_distribution(image_scores)
-        add_contrastive_rationales(image_candidates)
-        image_best = image_candidates[0] if image_candidates else None
         unified_image_candidates, unified_image_best = _build_unified_candidates(
             category=category_result.category,
             text=asset.text,
             filename=filename,
-            legacy_probs=_legacy_name_probs_from_candidates(image_candidates),
+            legacy_probs=None,
         )
         image_heuristics_best = unified_image_best.model_copy(deep=True) if unified_image_best else None
         stage_timings_ms["image_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -1822,13 +1939,17 @@ def classify_document(
                         source_name="vision_llm",
                         rationale=str(vlm_res.get("rationale", "")),
                     )
+                    image_ocr_chars = int((quality.metrics or {}).get("chars", 0)) if hasattr(quality, "metrics") else 0
+                    image_heuristics_alpha = min(heuristics_alpha, 0.35)
+                    if image_ocr_chars < 120 or not quality.ok:
+                        image_heuristics_alpha = 0.2
                     fusion_result = intelligent_fusion(
                         heuristics_result=heuristics_source,
                         vision_result=vision_source,
                         text_result=None,
                         strategy=FusionStrategy.CONFIDENCE_ADAPTIVE if fusion_strategy == "adaptive" else FusionStrategy.WEIGHTED,
-                        heuristics_alpha=heuristics_alpha,
-                        llm_alpha=1.0 - heuristics_alpha,
+                        heuristics_alpha=image_heuristics_alpha,
+                        llm_alpha=1.0 - image_heuristics_alpha,
                     )
                     image_fusion = FusionInfo(
                         fused=True,
@@ -1944,15 +2065,11 @@ def classify_document(
         language_info = detect_text_language(asset.text)
         non_english_llm_primary = bool(language_info["non_english_llm_primary"] and use_text_llm and LLM_CONFIGURED)
         stage_start = time.time()
-        _, video_scores = score_video_subcategories(asset.text, asset.lines, filename=filename)
-        video_candidates = build_probability_distribution(video_scores)
-        add_contrastive_rationales(video_candidates)
-        video_best = video_candidates[0] if video_candidates else None
         unified_video_candidates, unified_video_best = _build_unified_candidates(
             category=category_result.category,
             text=asset.text,
             filename=filename,
-            legacy_probs=_legacy_name_probs_from_candidates(video_candidates),
+            legacy_probs=None,
         )
         video_heuristics_best = unified_video_best.model_copy(deep=True) if unified_video_best else None
         stage_timings_ms["video_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -2024,8 +2141,9 @@ def classify_document(
                     agriculture_response.score = agriculture_response.confidence
                     agriculture_response.method = "video_vision_override"
                     agriculture_response.rationale = str(vlm_res.get("rationale", agriculture_response.rationale))
+                    fallback_key = unified_video_best.subcategory_id if unified_video_best else next(iter(_unified_key_by_name().values()), "")
                     video_vision_source = convert_to_source_result(
-                        subcategory_key=vlm_res.get("subcategory") or list(VIDEO_SUBTYPES.keys())[0],
+                        subcategory_key=vlm_res.get("subcategory") or fallback_key,
                         confidence=float(vlm_res.get("confidence", 0.0)),
                         probs=vlm_res.get("probs", {}),
                         source_name="vision_llm",
@@ -2142,13 +2260,20 @@ def classify_document(
                 rationale=unified_video_best.rationale,
             )
             if video_text_source or video_vision_source:
+                transcript_chars = int((quality.metrics or {}).get("chars", 0)) if hasattr(quality, "metrics") else 0
+                if video_text_source and video_vision_source:
+                    video_heuristics_alpha = 0.28 if transcript_chars < 250 else 0.24
+                elif video_text_source:
+                    video_heuristics_alpha = 0.34 if transcript_chars >= 250 else 0.26
+                else:
+                    video_heuristics_alpha = 0.18
                 fusion_result = intelligent_fusion(
                     heuristics_result=video_heuristics_source,
                     vision_result=video_vision_source,
                     text_result=video_text_source,
                     strategy=FusionStrategy.CONFIDENCE_ADAPTIVE if fusion_strategy == "adaptive" else FusionStrategy.WEIGHTED,
-                    heuristics_alpha=heuristics_alpha,
-                    llm_alpha=1.0 - heuristics_alpha,
+                    heuristics_alpha=video_heuristics_alpha,
+                    llm_alpha=1.0 - video_heuristics_alpha,
                 )
                 video_fusion = FusionInfo(
                     fused=True,
@@ -2331,15 +2456,11 @@ def classify_document(
         language_info = detect_text_language(asset.text)
         non_english_llm_primary = bool(language_info["non_english_llm_primary"] and use_text_llm and LLM_CONFIGURED)
         stage_start = time.time()
-        _, audio_scores = score_audio_subcategories(asset.text, asset.lines, filename=filename)
-        audio_candidates = build_probability_distribution(audio_scores)
-        add_contrastive_rationales(audio_candidates)
-        audio_best = audio_candidates[0] if audio_candidates else None
         unified_audio_candidates, unified_audio_best = _build_unified_candidates(
             category=category_result.category,
             text=asset.text,
             filename=filename,
-            legacy_probs=_legacy_name_probs_from_candidates(audio_candidates),
+            legacy_probs=None,
         )
         audio_heuristics_best = unified_audio_best.model_copy(deep=True) if unified_audio_best else None
         stage_timings_ms["audio_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
@@ -2395,13 +2516,15 @@ def classify_document(
                 evidence_score=unified_audio_best.evidence_score,
                 rationale=unified_audio_best.rationale,
             )
+            transcript_chars = int((quality.metrics or {}).get("chars", 0)) if hasattr(quality, "metrics") else 0
+            audio_heuristics_alpha = 0.30 if transcript_chars >= 250 else 0.22
             fusion_result = intelligent_fusion(
                 heuristics_result=audio_heuristics_source,
                 vision_result=None,
                 text_result=audio_text_source,
                 strategy=FusionStrategy.CONFIDENCE_ADAPTIVE if fusion_strategy == "adaptive" else FusionStrategy.WEIGHTED,
-                heuristics_alpha=heuristics_alpha,
-                llm_alpha=1.0 - heuristics_alpha,
+                heuristics_alpha=audio_heuristics_alpha,
+                llm_alpha=1.0 - audio_heuristics_alpha,
             )
             audio_fusion = FusionInfo(
                 fused=True,
@@ -2473,17 +2596,29 @@ def classify_document(
         language_info = detect_text_language(asset.text)
         non_english_llm_primary = bool(language_info["non_english_llm_primary"] and use_text_llm and LLM_CONFIGURED)
         stage_start = time.time()
-        _, dataset_scores = score_dataset_subcategories(asset.text, asset.lines)
-        dataset_candidates = build_probability_distribution(dataset_scores)
-        add_contrastive_rationales(dataset_candidates)
-        dataset_best = dataset_candidates[0] if dataset_candidates else None
-        dataset_heuristics_best = dataset_best.model_copy(deep=True) if dataset_best else None
+        unified_dataset_candidates, unified_dataset_best = _build_unified_candidates(
+            category=category_result.category,
+            text=asset.text,
+            filename=filename,
+            legacy_probs={},
+        )
+        dataset_heuristics_best = unified_dataset_best.model_copy(deep=True) if unified_dataset_best else None
         stage_timings_ms["dataset_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
         dataset_text_result = None
         dataset_text_source = None
         dataset_fusion = None
+        should_use_dataset_text_llm = (
+            use_text_llm
+            and LLM_CONFIGURED
+            and (
+                non_english_llm_primary
+                or unified_dataset_best is None
+                or unified_dataset_best.confidence < classification_confidence_threshold
+                or _top_probability_gap(unified_dataset_candidates) < TEXT_LLM_GAP_THRESHOLD
+            )
+        )
 
-        if use_text_llm and LLM_CONFIGURED:
+        if should_use_dataset_text_llm:
             stage_start = time.time()
             try:
                 from docint.llm.subcategory_classify import llm_classify_dataset_subcategories_text
@@ -2509,37 +2644,33 @@ def classify_document(
                     "confidence": round(llm_res.confidence, 4),
                     "rationale": llm_res.rationale,
                     "model": LLM_MODEL,
+                    "probs": llm_res.probs,
                 }
             except Exception as e:
                 dataset_text_result = {"error": str(e), "model": LLM_MODEL}
             stage_timings_ms["dataset_text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
 
         if non_english_llm_primary and dataset_text_source:
-            name_to_dataset_key = {subtype.name: key for key, subtype in DATASET_SUBTYPES.items()}
-            _apply_source_probabilities(dataset_candidates, dataset_text_source.probs, name_to_dataset_key)
-            dataset_best = dataset_candidates[0] if dataset_candidates else None
-            add_contrastive_rationales(dataset_candidates)
-        elif dataset_best and dataset_text_source:
-            name_to_dataset_key = {subtype.name: key for key, subtype in DATASET_SUBTYPES.items()}
-            dataset_heuristics_probs = {
-                name_to_dataset_key.get(candidate.subcategory_name, candidate.subcategory_name): candidate.probability
-                for candidate in dataset_candidates
-            }
+            _apply_source_probabilities(unified_dataset_candidates, dataset_text_source.probs, _unified_key_by_name())
+            unified_dataset_best = unified_dataset_candidates[0] if unified_dataset_candidates else None
+            add_contrastive_rationales(unified_dataset_candidates)
+        elif unified_dataset_best and dataset_text_source:
             dataset_heuristics_source = convert_to_source_result(
-                subcategory_key=name_to_dataset_key.get(dataset_best.subcategory_name, list(dataset_heuristics_probs.keys())[0]),
-                confidence=dataset_best.confidence,
-                probs=dataset_heuristics_probs,
+                subcategory_key=unified_dataset_best.subcategory_id,
+                confidence=unified_dataset_best.confidence,
+                probs={candidate.subcategory_id: candidate.probability for candidate in unified_dataset_candidates},
                 source_name="heuristics",
-                evidence_score=dataset_best.evidence_score,
-                rationale=dataset_best.rationale,
+                evidence_score=unified_dataset_best.evidence_score,
+                rationale=unified_dataset_best.rationale,
             )
+            dataset_alpha = 0.42 if len(asset.text) >= 1200 else 0.32
             fusion_result = intelligent_fusion(
                 heuristics_result=dataset_heuristics_source,
                 vision_result=None,
                 text_result=dataset_text_source,
                 strategy=FusionStrategy.CONFIDENCE_ADAPTIVE if fusion_strategy == "adaptive" else FusionStrategy.WEIGHTED,
-                heuristics_alpha=heuristics_alpha,
-                llm_alpha=1.0 - heuristics_alpha,
+                heuristics_alpha=dataset_alpha,
+                llm_alpha=1.0 - dataset_alpha,
             )
             dataset_fusion = FusionInfo(
                 fused=True,
@@ -2548,29 +2679,21 @@ def classify_document(
                 agreement_score=fusion_result.agreement_score,
                 rationale=fusion_result.rationale,
             )
-            for candidate in dataset_candidates:
-                dataset_key = name_to_dataset_key.get(candidate.subcategory_name, candidate.subcategory_name)
-                fused_prob = round(fusion_result.probs.get(dataset_key, 0), 4)
+            for candidate in unified_dataset_candidates:
+                fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
                 candidate.probability = fused_prob
                 candidate.confidence = fused_prob
-            dataset_candidates.sort(key=lambda item: item.probability, reverse=True)
-            for idx, candidate in enumerate(dataset_candidates, start=1):
+            unified_dataset_candidates.sort(key=lambda item: item.probability, reverse=True)
+            for idx, candidate in enumerate(unified_dataset_candidates, start=1):
                 candidate.rank = idx
-            dataset_best = dataset_candidates[0] if dataset_candidates else None
-            add_contrastive_rationales(dataset_candidates)
+            unified_dataset_best = unified_dataset_candidates[0] if unified_dataset_candidates else None
+            add_contrastive_rationales(unified_dataset_candidates)
         processing_time_ms = (time.time() - start_time) * 1000
-        unified_dataset_candidates, unified_dataset_best = _build_unified_candidates(
-            category=category_result.category,
-            text=asset.text,
-            filename=filename,
-            legacy_probs=_legacy_name_probs_from_candidates(dataset_candidates),
-        )
-        unified_dataset_heuristics = unified_dataset_candidates[0] if unified_dataset_candidates else None
         return ClassificationResponse(
             best_match=unified_dataset_best,
             all_candidates=unified_dataset_candidates,
             fusion=dataset_fusion,
-            heuristics=unified_dataset_heuristics,
+            heuristics=dataset_heuristics_best,
             vision_llm=None,
             text_llm=_map_llm_payload_to_unified(dataset_text_result),
             category_used=category_result.category,
@@ -2604,8 +2727,154 @@ def classify_document(
                 "auto_route_models": auto_route_models,
                 "routing": {
                     "dataset_mode": True,
-                    "text_llm": {"requested": use_text_llm, "used": dataset_text_result is not None and "error" not in dataset_text_result, "reason": "dataset_text_llm_enabled" if use_text_llm else "disabled"},
+                    "text_llm": {"requested": use_text_llm, "used": dataset_text_result is not None and "error" not in dataset_text_result, "reason": "dataset_text_llm_enabled" if should_use_dataset_text_llm else "heuristics_strong_enough"},
                     "vision_llm": {"requested": use_vision, "used": False, "reasons": ["dataset_vision_not_yet_enabled"]},
+                    "language_detection": language_info,
+                },
+                "classification_confidence_threshold": classification_confidence_threshold,
+                "stage_timings_ms": stage_timings_ms,
+            },
+        )
+
+    if category_result.category == "Software Application":
+        language_info = detect_text_language(asset.text)
+        non_english_llm_primary = bool(language_info["non_english_llm_primary"] and use_text_llm and LLM_CONFIGURED)
+        stage_start = time.time()
+        unified_software_candidates, unified_software_best = _build_unified_candidates(
+            category=category_result.category,
+            text=asset.text,
+            filename=filename,
+            legacy_probs={},
+        )
+        software_heuristics_best = unified_software_best.model_copy(deep=True) if unified_software_best else None
+        stage_timings_ms["software_classification_ms"] = round((time.time() - stage_start) * 1000, 2)
+        software_text_result = None
+        software_text_source = None
+        software_fusion = None
+
+        should_use_software_text_llm = (
+            use_text_llm
+            and LLM_CONFIGURED
+            and (
+                non_english_llm_primary
+                or unified_software_best is None
+                or unified_software_best.confidence < classification_confidence_threshold
+                or _top_probability_gap(unified_software_candidates) < TEXT_LLM_GAP_THRESHOLD
+            )
+        )
+
+        if should_use_software_text_llm:
+            stage_start = time.time()
+            try:
+                from docint.llm.subcategory_classify import llm_classify_software_subcategories_text
+
+                llm_res = llm_classify_software_subcategories_text(
+                    asset.text,
+                    base_url=LLM_BASE_URL,
+                    api_key=LLM_API_KEY,
+                    model=LLM_MODEL,
+                    max_chars=12000,
+                    temperature=0.2,
+                )
+                software_text_source = convert_to_source_result(
+                    subcategory_key=llm_res.subcategory_key,
+                    confidence=llm_res.confidence,
+                    probs=llm_res.probs,
+                    source_name="text_llm",
+                    rationale=llm_res.rationale,
+                )
+                software_text_result = {
+                    "subcategory_key": llm_res.subcategory_key,
+                    "subcategory_name": llm_res.subcategory_name,
+                    "confidence": round(llm_res.confidence, 4),
+                    "rationale": llm_res.rationale,
+                    "model": LLM_MODEL,
+                    "probs": llm_res.probs,
+                }
+            except Exception as e:
+                software_text_result = {"error": str(e), "model": LLM_MODEL}
+            stage_timings_ms["software_text_llm_ms"] = round((time.time() - stage_start) * 1000, 2)
+
+        if non_english_llm_primary and software_text_source:
+            _apply_source_probabilities(unified_software_candidates, software_text_source.probs, _unified_key_by_name())
+            unified_software_best = unified_software_candidates[0] if unified_software_candidates else None
+            add_contrastive_rationales(unified_software_candidates)
+        elif unified_software_best and software_text_source:
+            software_heuristics_source = convert_to_source_result(
+                subcategory_key=unified_software_best.subcategory_id,
+                confidence=unified_software_best.confidence,
+                probs={candidate.subcategory_id: candidate.probability for candidate in unified_software_candidates},
+                source_name="heuristics",
+                evidence_score=unified_software_best.evidence_score,
+                rationale=unified_software_best.rationale,
+            )
+            software_alpha = 0.38 if len(asset.text) >= 1200 else 0.28
+            fusion_result = intelligent_fusion(
+                heuristics_result=software_heuristics_source,
+                vision_result=None,
+                text_result=software_text_source,
+                strategy=FusionStrategy.CONFIDENCE_ADAPTIVE if fusion_strategy == "adaptive" else FusionStrategy.WEIGHTED,
+                heuristics_alpha=software_alpha,
+                llm_alpha=1.0 - software_alpha,
+            )
+            software_fusion = FusionInfo(
+                fused=True,
+                strategy=fusion_result.fusion_strategy,
+                weights=fusion_result.weights,
+                agreement_score=fusion_result.agreement_score,
+                rationale=fusion_result.rationale,
+            )
+            for candidate in unified_software_candidates:
+                fused_prob = round(fusion_result.probs.get(candidate.subcategory_id, 0), 4)
+                candidate.probability = fused_prob
+                candidate.confidence = fused_prob
+            unified_software_candidates.sort(key=lambda item: item.probability, reverse=True)
+            for idx, candidate in enumerate(unified_software_candidates, start=1):
+                candidate.rank = idx
+            unified_software_best = unified_software_candidates[0] if unified_software_candidates else None
+            add_contrastive_rationales(unified_software_candidates)
+
+        processing_time_ms = (time.time() - start_time) * 1000
+        return ClassificationResponse(
+            best_match=unified_software_best,
+            all_candidates=unified_software_candidates,
+            fusion=software_fusion,
+            heuristics=software_heuristics_best,
+            vision_llm=None,
+            text_llm=_map_llm_payload_to_unified(software_text_result),
+            category_used=category_result.category,
+            category_inference=None,
+            agriculture_relevance=agriculture_response,
+            classification_skipped=False,
+            skip_reason=None,
+            total_candidates=len(unified_software_candidates),
+            confidence_threshold_met=bool(unified_software_best and unified_software_best.confidence >= classification_confidence_threshold),
+            document_info={
+                "filename": filename,
+                "pages": asset.units,
+                "unit_label": asset.unit_label,
+                "asset_type": asset.asset_type,
+                "inferred_category": category_result.category,
+                "source": asset.source,
+                "text_length": len(asset.text),
+                "text_quality": {
+                    "chars": quality.metrics.get("chars"),
+                    "letters": quality.metrics.get("letters"),
+                    "letter_ratio": quality.metrics.get("letter_ratio"),
+                    "ok": quality.ok,
+                } if hasattr(quality, 'metrics') else None,
+            },
+            processing_info={
+                "processing_time_ms": round(processing_time_ms, 2),
+                "ocr_used": asset.source == "ocr",
+                "sources_used": ["heuristics"] + (["text_llm"] if software_text_result is not None and "error" not in software_text_result else []),
+                "fusion_enabled": software_fusion is not None,
+                "require_agriculture": require_agriculture,
+                "auto_route_models": auto_route_models,
+                "routing": {
+                    "software_mode": True,
+                    "text_llm": {"requested": use_text_llm, "used": software_text_result is not None and "error" not in software_text_result, "reason": "software_text_llm_enabled" if should_use_software_text_llm else "heuristics_strong_enough"},
+                    "vision_llm": {"requested": use_vision, "used": False, "reasons": ["software_vision_not_yet_enabled"]},
                     "language_detection": language_info,
                 },
                 "classification_confidence_threshold": classification_confidence_threshold,
@@ -3031,6 +3300,11 @@ async def root(request: Request):
         "visualisations": {
             "subcategories_graph": "/visualisations/subcategories_graph.html",
         },
+        "supported_file_types": {
+            "upload": SUPPORTED_FILE_TYPES_BY_CATEGORY,
+            "url_suffix_hints": URL_SUFFIX_HINTS_BY_CATEGORY,
+            "upload_total": sum(len(values) for values in SUPPORTED_FILE_TYPES_BY_CATEGORY.values()),
+        },
     }
 
 
@@ -3408,6 +3682,17 @@ async def list_subcategories(request: Request):
         "subcategories": subcats,
         "total": len(subcats),
         "all_features": get_all_detectable_features(),
+        "supported_file_types": {
+            "upload": SUPPORTED_FILE_TYPES_BY_CATEGORY,
+            "url_suffix_hints": URL_SUFFIX_HINTS_BY_CATEGORY,
+            "counts": {category: len(values) for category, values in SUPPORTED_FILE_TYPES_BY_CATEGORY.items()},
+            "upload_total": sum(len(values) for values in SUPPORTED_FILE_TYPES_BY_CATEGORY.values()),
+            "notes": {
+                "category_binding": "Category is derived operationally from MIME type or URL/file signals; subcategory is derived from evidence in the asset.",
+                "software_application": "Software Application currently has no dedicated upload extensions and is primarily inferred from URL text/metadata.",
+                "xlsx": "XLSX is usually routed as Dataset, but may remain Document in lightweight spreadsheet cases.",
+            },
+        },
     }
 
 
