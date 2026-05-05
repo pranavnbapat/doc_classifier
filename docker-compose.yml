@@ -1,9 +1,10 @@
 services:
   ko-classifier:
+    platform: ${PLATFORM:-linux/amd64}
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/pranavnbapat/ko-classifier:latest
+    image: ${APP_IMAGE:-ghcr.io/pranavnbapat/ko-classifier:latest}
     container_name: ko-classifier
     restart: unless-stopped
     

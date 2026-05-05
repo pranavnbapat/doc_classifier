@@ -44,7 +44,13 @@ old/
 *.local.py
 
 # Sample files (not needed in container)
-files/*.pdf
+files/
+
+# Data build sources / local reference assets not needed at runtime
+data_model/*.pdf
+data_model/new/
+data_model/generated/agrovoc_full_export.jsonl
+data_model/generated/agrovoc_full_export.checkpoint.json
 
 # Docker files themselves
 Dockerfile
