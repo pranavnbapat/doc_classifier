@@ -161,6 +161,9 @@ cython_debug/
 
 # JSON data files (often contain sensitive data or are large)
 *.json
+*.csv
+*.xlsx
+*.tsv
 !data_model/*.json
 !data_model/generated/*.json
 *.jsonl
