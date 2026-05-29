@@ -1,4 +1,9 @@
 # =============================================================================
+# STALE / RETIRED ASSETS (kept locally for reference, excluded from the repo)
+# =============================================================================
+stale/
+
+# =============================================================================
 # PYTHON
 # =============================================================================
 
@@ -164,19 +169,24 @@ cython_debug/
 *.csv
 *.xlsx
 *.tsv
-!data_model/*.json
-!data_model/generated/*.json
+*.mp4
 *.jsonl
-!data_model/generated/agriculture_anchor_texts.jsonl
 *.npz
-!data_model/generated/agriculture_bucket_centroids.npz
+
+# data_model: commit all runtime artifacts and build inputs/outputs; keep only
+# the large, regenerable AGROVOC exports out of the repo.
+# (re-include data_model/build first: the generic `build/` rule above excludes
+#  it, and files cannot be re-included while their parent dir stays excluded.)
+!data_model/build/
+!data_model/**/*.json
+!data_model/**/*.jsonl
+!data_model/runtime/**/*.npz
+data_model/build/agriculture/agrovoc_full_export.jsonl
+data_model/build/agriculture/agrovoc_full_export.checkpoint.json
+
 !schema*.json
 !package.json
 !package-lock.json
-
-# Generated agriculture build artifacts
-data_model/generated/agrovoc_full_export.jsonl
-data_model/generated/agrovoc_full_export.checkpoint.json
 
 # PDF documents (sensitive content, binary files)
 *.pdf

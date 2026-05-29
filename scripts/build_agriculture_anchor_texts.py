@@ -12,8 +12,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LEXICON_PATH = REPO_ROOT / "data_model" / "agriculture_lexicon.json"
-OUT_PATH = REPO_ROOT / "data_model" / "generated" / "agriculture_anchor_texts.jsonl"
+LEXICON_PATH = REPO_ROOT / "data_model" / "runtime" / "agriculture" / "lexicon.json"
+OUT_PATH = REPO_ROOT / "data_model" / "build" / "agriculture" / "anchor_texts.jsonl"
 
 
 def main() -> None:

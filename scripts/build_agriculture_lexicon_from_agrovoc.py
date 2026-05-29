@@ -92,10 +92,10 @@ DEFAULT_BUCKET_RULES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="data_model/generated/agrovoc_full_export.jsonl")
-    parser.add_argument("--out", default="data_model/agriculture_lexicon.json")
-    parser.add_argument("--overrides", default="data_model/agriculture_lexicon_overrides.json")
-    parser.add_argument("--blocklist", default="data_model/agriculture_lexicon_blocklist.json")
+    parser.add_argument("--input", default="data_model/build/agriculture/agrovoc_full_export.jsonl")
+    parser.add_argument("--out", default="data_model/runtime/agriculture/lexicon.json")
+    parser.add_argument("--overrides", default="data_model/build/agriculture/lexicon_overrides.json")
+    parser.add_argument("--blocklist", default="data_model/build/agriculture/lexicon_blocklist.json")
     parser.add_argument("--langs", nargs="*", default=list(DEFAULT_ALLOWED_LANGS))
     parser.add_argument("--include-unmapped", action="store_true")
     return parser.parse_args()

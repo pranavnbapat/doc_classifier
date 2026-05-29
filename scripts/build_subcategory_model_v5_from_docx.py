@@ -12,10 +12,10 @@ from docx import Document
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_MODEL_DIR = BASE_DIR / "data_model"
-NEW_DIR = DATA_MODEL_DIR / "new"
-OUT_DIR = DATA_MODEL_DIR / "generated" / "v5"
+NEW_DIR = DATA_MODEL_DIR / "build" / "subcategories_docx"
+OUT_DIR = DATA_MODEL_DIR / "runtime" / "subcategories"
 
-MONGO_EXPORT_PATH = DATA_MODEL_DIR / "data_model.subcategories.v5.json"
+MONGO_EXPORT_PATH = DATA_MODEL_DIR / "build" / "subcategories" / "mongo_export.json"
 FULL_MODEL_PATH = OUT_DIR / "subcategories_v5_full_model.json"
 
 SOURCE_DOCS = {
@@ -409,50 +409,101 @@ def attach_cross_links(full_model: dict[str, Any]) -> None:
 
 
 def build_mongo_export(full_model: dict[str, Any]) -> list[dict[str, Any]]:
+    broad_ids = {
+        "structured_domain_datasets",
+        "software_tools_and_applications",
+        "technical_and_research_content",
+        "templates_and_reusable_formats",
+        "summaries_factsheets_and_outreach",
+        "photographs_and_field_images",
+    }
     now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     records = []
     for item in full_model["unified_subcategories"]:
-        categories = item["applicable_categories"]
-        category_ids = [MONGO_CATEGORY_IDS[name] for name in categories]
-        source_modalities = sorted({mapping["modality"] for mapping in item["source_mappings"]})
-        source_subcategories = sorted(
+        categories = sorted(item["applicable_categories"])
+        source_mappings = []
+        source_modality_summary: dict[str, dict[str, Any]] = {}
+        example_values = []
+
+        for mapping in item["source_mappings"]:
+            profile = next(
+                (
+                    profile_item for profile_item in item.get("source_profiles", [])
+                    if profile_item["modality"] == mapping["modality"]
+                    and profile_item["profile_name"] == mapping["source_subcategory"]
+                ),
+                None,
+            )
+            merged_from = sorted({value for value in (profile or {}).get("merged_from", []) if value})
+            example_text = compact((profile or {}).get("examples", ""))
+            if example_text:
+                example_values.append(example_text)
+
+            modality_entry = source_modality_summary.setdefault(
+                mapping["modality"],
+                {"modality": mapping["modality"], "merged_from": set()},
+            )
+            modality_entry["merged_from"].update(merged_from)
+
+            source_mappings.append(
+                {
+                    "source_profile_id": profile["profile_id"] if profile else mapping["source_subcategory_id"],
+                    "source_profile_name": mapping["source_subcategory"],
+                    "source_modality": mapping["modality"],
+                    "applicable_category": mapping["category"],
+                    "mapping_strength": mapping["strength"],
+                    "mapping_strength_definition": mapping["strength_definition"],
+                    "why": mapping["rationale"],
+                    "merged_from": merged_from,
+                }
+            )
+
+        source_modalities = [
             {
-                mapping["source_subcategory"]
-                for mapping in item["source_mappings"]
+                "modality": modality,
+                "merged_from": sorted(values["merged_from"]),
             }
+            for modality, values in sorted(source_modality_summary.items())
+        ]
+        source_modality_names = [entry["modality"] for entry in source_modalities]
+        mapping_summary = (
+            f"Merged from {len(source_mappings)} source mappings across "
+            f"{', '.join(source_modality_names)}."
+            if source_mappings
+            else "No source mappings recorded."
+        )
+        short_description = item["definition"]
+        display_hint = item["scope_note"] or item["definition"]
+        llm_display_hint = (
+            f"Choose {item['name']} when the dominant evidence matches: "
+            + ", ".join(item["feature_basis"][:4])
         )
         records.append(
             {
-                "_id": deterministic_id(item["id"]),
+                "_id": item["id"],
+                "id": item["id"],
                 "created_ts": {"$date": now},
                 "created_by": "System",
                 "updated_ts": {"$date": now},
                 "updated_by": "System",
-                "version": 1,
+                "version": 5,
                 "status": "Published",
+                "model_version": full_model["model_version"],
                 "name": item["name"],
                 "user_label": item["user_label"],
                 "definition": item["definition"],
                 "scope_note": item["scope_note"],
                 "feature_basis": item["feature_basis"],
-                "parent_category": categories,
-                "parent_category_id": category_ids,
-                "category_binding_mode": "decoupled",
-                "subcategory_type": "unified",
+                "applicable_categories": categories,
                 "source_modalities": source_modalities,
-                "source_subcategories": source_subcategories,
-                "mapping_strength_counts": item["summary_counts"],
-                "source_mappings": item["source_mappings"],
-                "source_profiles": item["source_profiles"],
-                "source_docs": sorted(
-                    {
-                        item["source_doc"],
-                        *[
-                            profile["modality"] + ":" + profile["profile_name"]
-                            for profile in item["source_profiles"]
-                        ],
-                    }
-                ),
+                "source_mappings": source_mappings,
+                "mapping_summary": mapping_summary,
+                "specificity": "broad" if item["id"] in broad_ids else "specific",
+                "short_description": short_description,
+                "display_hint": display_hint,
+                "examples": sorted(dict.fromkeys(example_values)),
+                "non_examples": [],
+                "llm_display_hint": llm_display_hint,
             }
         )
     return records

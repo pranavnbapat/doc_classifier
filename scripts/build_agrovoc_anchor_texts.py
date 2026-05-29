@@ -23,7 +23,7 @@ PAGE_SIZE = 1500
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--out", default="data_model/generated/agrovoc_anchor_texts.jsonl")
+    p.add_argument("--out", default="data_model/build/agriculture/agrovoc_anchor_texts.jsonl")
     p.add_argument("--limit", type=int, default=20000)
     p.add_argument("--langs", nargs="*", default=list(DEFAULT_LANGS))
     return p.parse_args()

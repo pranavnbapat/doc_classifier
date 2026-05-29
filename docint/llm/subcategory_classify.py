@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import base64
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Any
 from pathlib import Path
@@ -33,6 +34,77 @@ def _normalize_probs_for_category(probs: Dict[str, float], category: str) -> Dic
     if s <= 0:
         return {k: round(1.0 / len(keys), 4) for k in keys}
     return {k: round(v / s, 4) for k, v in out.items()}
+
+
+def _parse_llm_json_response(raw: str, *, label: str) -> Dict[str, Any]:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError(f"Could not parse {label} response: {raw[:200]}")
+
+        candidate = raw[start:end + 1]
+        repairs = [
+            candidate,
+            re.sub(r",\s*([}\]])", r"\1", candidate),
+            re.sub(r"(?<!\\\\)\n", " ", candidate),
+        ]
+        repairs.append(re.sub(r",\s*([}\]])", r"\1", repairs[-1]))
+
+        for repaired in repairs:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError(f"Could not parse {label} response: {raw[:200]}")
+
+
+def _salvage_partial_llm_payload(raw: str, *, category: str) -> Dict[str, Any]:
+    keys = _category_keys(category)
+
+    def _extract(pattern: str) -> str:
+        match = re.search(pattern, raw, flags=re.IGNORECASE | re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    subcategory = _extract(r'"subcategory"\s*:\s*"([^"]+)"')
+    profile_id = _extract(r'"profile_id"\s*:\s*"([^"]+)"')
+    confidence_str = _extract(r'"confidence"\s*:\s*([0-9]*\.?[0-9]+)')
+    rationale = _extract(r'"rationale"\s*:\s*"([^"]*)"')
+    closest_alternative = _extract(r'"closest_alternative"\s*:\s*"([^"]+)"')
+
+    if not subcategory or subcategory not in keys:
+        raise ValueError("salvage failed: missing valid subcategory")
+
+    try:
+        confidence = float(confidence_str) if confidence_str else 0.75
+    except ValueError:
+        confidence = 0.75
+
+    confidence = max(0.0, min(1.0, confidence))
+    probs: Dict[str, float] = {key: 0.0 for key in keys}
+    probs[subcategory] = confidence
+
+    remainder_keys = [key for key in keys if key != subcategory]
+    remainder = max(0.0, 1.0 - confidence)
+    if remainder_keys:
+        share = remainder / len(remainder_keys)
+        for key in remainder_keys:
+            probs[key] = share
+
+    return {
+        "subcategory": subcategory,
+        "profile_id": profile_id or None,
+        "confidence": confidence,
+        "rationale": rationale or "Recovered from malformed LLM JSON output.",
+        "matched_signals": [],
+        "conflicting_signals": [],
+        "closest_alternative": closest_alternative or (remainder_keys[0] if remainder_keys else subcategory),
+        "probs": probs,
+        "_salvaged": True,
+    }
 
 
 def _build_unified_category_prompt(
@@ -279,16 +351,7 @@ def llm_classify_subcategories_text(
     raw = resp.choices[0].message.content or ""
     
     # Parse JSON response
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # Try to extract JSON from markdown/code blocks
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse LLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="document LLM")
     
     # Extract and normalize
     subcat_key = data.get("subcategory", "")
@@ -342,14 +405,9 @@ def llm_classify_dataset_subcategories_text(
 
     raw = resp.choices[0].message.content or ""
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse dataset LLM response: {raw[:200]}")
+        data = _parse_llm_json_response(raw, label="dataset LLM")
+    except ValueError:
+        data = _salvage_partial_llm_payload(raw, category="Dataset")
 
     subcat_key = data.get("subcategory", "")
     if subcat_key not in DATASET_UNIFIED_KEYS:
@@ -400,15 +458,7 @@ def llm_classify_software_subcategories_text(
     )
 
     raw = resp.choices[0].message.content or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse software LLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="software LLM")
 
     subcat_key = data.get("subcategory", "")
     if subcat_key not in SOFTWARE_UNIFIED_KEYS:
@@ -463,15 +513,7 @@ def llm_classify_image_with_vision(
         max_tokens=1200,
     )
     raw = resp.choices[0].message.content or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse image VLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="image VLM")
 
     probs = _normalize_probs_for_category(data.get("probs", {}), "Image")
     data["probs"] = probs
@@ -508,15 +550,7 @@ def llm_classify_audio_subcategories_text(
     )
 
     raw = resp.choices[0].message.content or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse audio LLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="audio LLM")
 
     subcat_key = data.get("subcategory", "")
     if subcat_key not in AUDIO_UNIFIED_KEYS:
@@ -567,15 +601,7 @@ def llm_classify_video_subcategories_text(
     )
 
     raw = resp.choices[0].message.content or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse video-text LLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="video text LLM")
 
     subcat_key = data.get("subcategory", "")
     if subcat_key not in VIDEO_UNIFIED_KEYS:
@@ -634,15 +660,7 @@ def llm_classify_video_with_vision(
     )
 
     raw = resp.choices[0].message.content or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse video VLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="video VLM")
 
     probs = normalize_video_probs(data.get("probs", {}))
     data["probs"] = probs
@@ -733,15 +751,7 @@ def llm_classify_subcategories_vision_batch(
     raw = resp.choices[0].message.content or ""
     
     # Parse JSON
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(raw[start:end + 1])
-        else:
-            raise ValueError(f"Could not parse VLM response: {raw[:200]}")
+    data = _parse_llm_json_response(raw, label="document VLM")
     
     # Extract results
     subcat_key = data.get("subcategory", "")

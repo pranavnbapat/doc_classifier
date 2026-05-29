@@ -24,6 +24,35 @@ def _has_ffmpeg() -> bool:
     return bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
 
 
+def _video_has_audio_stream(video_path: str) -> Optional[bool]:
+    if not _has_ffmpeg():
+        return None
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "json",
+            video_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+        return bool(data.get("streams"))
+    except Exception:
+        return None
+
+
 def media_duration_seconds(media_path: str) -> Optional[float]:
     if not _has_ffmpeg():
         return None
@@ -130,32 +159,69 @@ def transcribe_video_audio(video_path: str) -> AudioTranscriptionResult:
             rationale="FFmpeg not available for audio extraction from video",
         )
 
+    has_audio_stream = _video_has_audio_stream(video_path)
+    if has_audio_stream is False:
+        return AudioTranscriptionResult(
+            available=True,
+            used=False,
+            text="",
+            method="no_audio_stream",
+            model=None,
+            rationale="The uploaded video does not contain an audio stream to transcribe.",
+        )
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
         audio_path = tmp.name
 
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-vn",
-            "-acodec",
-            "mp3",
-            audio_path,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0 or not Path(audio_path).exists():
-        return AudioTranscriptionResult(
-            available=False,
-            used=False,
-            text="",
-            method="audio_extract_failed",
-            model=None,
-            rationale="Could not extract an audio track from the video for transcription",
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                video_path,
+                "-vn",
+                "-acodec",
+                "mp3",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        if result.returncode != 0 or not Path(audio_path).exists():
+            return AudioTranscriptionResult(
+                available=False,
+                used=False,
+                text="",
+                method="audio_extract_failed",
+                model=None,
+                rationale="Could not extract an audio track from the video for transcription.",
+            )
 
-    return transcribe_audio_file(audio_path)
+        if Path(audio_path).stat().st_size == 0:
+            return AudioTranscriptionResult(
+                available=True,
+                used=False,
+                text="",
+                method="empty_extracted_audio",
+                model=None,
+                rationale="Audio extraction completed, but the resulting track was empty.",
+            )
+
+        result = transcribe_audio_file(audio_path)
+        if result.available and result.used and not result.text.strip():
+            return AudioTranscriptionResult(
+                available=True,
+                used=True,
+                text="",
+                method=result.method,
+                model=result.model,
+                rationale="Media transcriber ran, but returned no usable transcript text for the extracted video audio.",
+            )
+        return result
+    finally:
+        try:
+            Path(audio_path).unlink(missing_ok=True)
+        except Exception:
+            pass

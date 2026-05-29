@@ -46,9 +46,9 @@ EMBEDDING_TEXT_LIMIT = int(os.getenv("AGRI_EMBEDDING_TEXT_LIMIT", "3500"))
 EMBEDDING_OVERRIDE_THRESHOLD = float(os.getenv("AGRI_EMBEDDING_OVERRIDE_THRESHOLD", "0.74"))
 EMBEDDING_BLEND_WEIGHT = float(os.getenv("AGRI_EMBEDDING_BLEND_WEIGHT", "0.45"))
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GENERATED_DIR = REPO_ROOT / "data_model" / "generated"
-BUCKET_CENTROID_PATH = GENERATED_DIR / "agriculture_bucket_centroids.npz"
-BUCKET_CENTROID_META_PATH = GENERATED_DIR / "agriculture_bucket_centroids.meta.json"
+AGRICULTURE_RUNTIME_DIR = REPO_ROOT / "data_model" / "runtime" / "agriculture"
+BUCKET_CENTROID_PATH = AGRICULTURE_RUNTIME_DIR / "bucket_centroids.npz"
+BUCKET_CENTROID_META_PATH = AGRICULTURE_RUNTIME_DIR / "bucket_centroids.meta.json"
 NON_AGRICULTURE_PROTOTYPES = [
     "query: generic software products corporate administration mobile applications SaaS tooling account management and login workflows",
     "query: urban mobility finance legal compliance media entertainment consumer marketing and generic web publishing",

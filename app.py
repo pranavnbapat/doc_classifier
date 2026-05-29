@@ -48,6 +48,7 @@ from docint.security.upload_security import (
 from docint.extract.quality import text_quality_ok
 from docint.extract.ocr import ocr_pdf, ocr_image
 from docint.category.infer import infer_category, infer_file_category, infer_url_category
+from docint.topics.infer import infer_topics
 from docint.ingest.dispatcher import ingest_asset, SUPPORTED_DOCUMENT_EXTENSIONS
 from docint.ingest.unit_limits import inspect_document_units
 from docint.video.extract import media_duration_seconds, sample_video_frames, transcribe_video_audio
@@ -286,6 +287,25 @@ class AgricultureRelevance(BaseModel):
     stage_results: List[Dict[str, Any]]
 
 
+class TopicResult(BaseModel):
+    """A single inferred topic with its supporting evidence."""
+    topic: str
+    score: float = Field(..., ge=0.0, le=1.0)
+    lexical_score: float = Field(..., ge=0.0, le=1.0)
+    embedding_score: float = Field(..., ge=0.0, le=1.0)
+    matched_terms: List[str] = []
+    rationale: str = ""
+
+
+class TopicInference(BaseModel):
+    """Multi-label topic assignment (orthogonal to category/subcategory)."""
+    topics: List[TopicResult] = []
+    method: str
+    stages_used: List[str] = []
+    signals_version: str
+    rationale: str = ""
+
+
 class CategoryInference(BaseModel):
     """Inferred high-level category for the uploaded asset."""
     category: str
@@ -309,6 +329,7 @@ class ClassificationResponse(BaseModel):
     category_used: str
     category_inference: Optional[CategoryInference] = None
     agriculture_relevance: AgricultureRelevance
+    topics: Optional[TopicInference] = None
     classification_skipped: bool = False
     skip_reason: Optional[str] = None
     
@@ -321,6 +342,29 @@ class ClassificationResponse(BaseModel):
 
 class UrlClassificationRequest(BaseModel):
     url: str = Field(..., description="Public http/https URL to classify")
+
+
+class MediaLlmTranscriptInfo(BaseModel):
+    available: bool
+    used: bool
+    method: str
+    model: Optional[str] = None
+    rationale: str
+    text_length: int
+    preview: str
+    full_text: Optional[str] = None
+
+
+class MediaLlmOnlyResponse(BaseModel):
+    category_used: str
+    best_match: Optional[SubcategoryCandidate] = None
+    all_candidates: List[SubcategoryCandidate] = []
+    text_llm: Optional[Dict[str, Any]] = None
+    transcript: MediaLlmTranscriptInfo
+    total_candidates: int
+    confidence_threshold_met: bool
+    document_info: Dict[str, Any]
+    processing_info: Dict[str, Any]
 
 
 # =============================================================================
@@ -563,6 +607,104 @@ def _compact_processing_info(processing_info: Dict[str, Any]) -> Dict[str, Any]:
     compact = dict(processing_info or {})
     compact["security_gate"] = _compact_security_gate(compact.get("security_gate", {}))
     return compact
+
+
+def _media_llm_candidates_from_result(
+    llm_res: Any,
+    *,
+    top_k_candidates: int,
+) -> List[SubcategoryCandidate]:
+    unified_defs = load_unified_subtypes()
+    sorted_probs = sorted(
+        ((str(key), float(prob)) for key, prob in (llm_res.probs or {}).items()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    candidates: List[SubcategoryCandidate] = []
+    for rank, (subcat_key, prob) in enumerate(sorted_probs[:top_k_candidates], start=1):
+        subtype = unified_defs.get(subcat_key)
+        if not subtype:
+            continue
+
+        rationale = llm_res.rationale if rank == 1 else f"Transcript-first text LLM ranked {subtype.name} with probability {round(prob, 4)}."
+        candidates.append(
+            SubcategoryCandidate(
+                subcategory_id=subcat_key,
+                subcategory_name=subtype.name,
+                parent_type="unified",
+                confidence=round(prob, 4),
+                probability=round(prob, 4),
+                evidence_score=round(prob, 4),
+                max_possible_evidence=1.0,
+                features_found=["text_llm", "media_transcript"],
+                feature_details={},
+                rationale=rationale,
+                selection_basis="text_llm",
+                rank=rank,
+            )
+        )
+
+    return candidates
+
+
+def _apply_dataset_consensus_boost(
+    candidates: List[SubcategoryCandidate],
+    *,
+    heuristics_best: Optional[SubcategoryCandidate],
+    text_source: Optional[SourceResult],
+    fusion_info: Optional["FusionInfo"],
+) -> None:
+    if not candidates or not heuristics_best or not text_source or not fusion_info:
+        return
+
+    broad_fallback_ids = {
+        "structured_domain_datasets",
+        "templates_and_reusable_formats",
+        "technical_and_research_content",
+    }
+
+    agreed_id = heuristics_best.subcategory_id
+    if text_source.subcategory_key != agreed_id:
+        return
+    if agreed_id in broad_fallback_ids:
+        return
+    if fusion_info.agreement_score < 0.95:
+        return
+
+    top = next((candidate for candidate in candidates if candidate.subcategory_id == agreed_id), None)
+    if not top:
+        return
+
+    heuristic_conf = float(heuristics_best.confidence)
+    text_conf = float(text_source.confidence)
+    target = max(top.probability, min(0.92, (0.45 * heuristic_conf) + (0.55 * text_conf) + 0.08))
+    if target <= top.probability:
+        return
+
+    remaining = 1.0 - target
+    others = [candidate for candidate in candidates if candidate.subcategory_id != agreed_id]
+    others_total = sum(max(candidate.probability, 0.0) for candidate in others)
+
+    top.probability = round(target, 4)
+    top.confidence = round(target, 4)
+    top.selection_basis = "fusion"
+
+    if others and others_total > 0:
+        scale = remaining / others_total
+        for candidate in others:
+            adjusted = max(0.0, candidate.probability * scale)
+            candidate.probability = round(adjusted, 4)
+            candidate.confidence = round(adjusted, 4)
+    elif others:
+        share = remaining / len(others)
+        for candidate in others:
+            candidate.probability = round(share, 4)
+            candidate.confidence = round(share, 4)
+
+    candidates.sort(key=lambda item: item.probability, reverse=True)
+    for idx, candidate in enumerate(candidates, start=1):
+        candidate.rank = idx
 
 
 def _prepare_response(
@@ -1048,6 +1190,57 @@ def _agri_gate_or_raise(scan_result: Any, *, strict: bool, source_label: str) ->
     return payload
 
 
+# Topics are only inferred for assets that cleared the agriculture gate and have
+# enough text to score; below this many characters lexical/embedding signals are
+# too thin to be trustworthy.
+TOPIC_MIN_CHARS = int(os.getenv("TOPIC_MIN_CHARS", "120"))
+
+
+def _infer_topics_response(
+    *,
+    text: str,
+    lines: Optional[List[str]],
+    agri_relevance: Any,
+) -> Optional[TopicInference]:
+    """Run multi-label topic inference, gated on agriculture relevance.
+
+    Returns None (no topics emitted) when the asset is not agriculture-related
+    or has too little text. Never raises: topic inference must not be able to
+    fail a classification request.
+    """
+    if not getattr(agri_relevance, "is_agriculture_related", False):
+        return None
+    if not text or len(text.strip()) < TOPIC_MIN_CHARS:
+        return None
+    try:
+        result = infer_topics(text, lines=lines)
+    except Exception as exc:
+        return TopicInference(
+            topics=[],
+            method="error",
+            stages_used=[],
+            signals_version="unknown",
+            rationale=f"Topic inference unavailable: {exc}",
+        )
+    return TopicInference(
+        topics=[
+            TopicResult(
+                topic=t.topic,
+                score=t.score,
+                lexical_score=t.lexical_score,
+                embedding_score=t.embedding_score,
+                matched_terms=t.matched_terms,
+                rationale=t.rationale,
+            )
+            for t in result.topics
+        ],
+        method=result.method,
+        stages_used=result.stages_used,
+        signals_version=result.signals_version,
+        rationale=result.rationale,
+    )
+
+
 def classify_url_text(
     *,
     url: str,
@@ -1114,6 +1307,8 @@ def classify_url_text(
         ],
     )
 
+    topics_response = _infer_topics_response(text=text, lines=lines, agri_relevance=agri_relevance)
+
     base_document_info = {
         "filename": url,
         "pages": 1,
@@ -1147,6 +1342,7 @@ def classify_url_text(
             category_used=category_result.category,
             category_inference=category_response,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=True,
             skip_reason=f"Agriculture-related but not an eligible knowledge object: {exclusion_label}",
             total_candidates=0,
@@ -1183,6 +1379,7 @@ def classify_url_text(
             category_used=category_result.category,
             category_inference=category_response,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=True,
             skip_reason=f"{category_result.category} URL classified as non-agriculture; subcategory classification skipped",
             total_candidates=0,
@@ -1222,6 +1419,7 @@ def classify_url_text(
             category_used=category_result.category,
             category_inference=category_response,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=True,
             skip_reason=f"Agriculture-related but not an eligible knowledge object: {exclusion_label}",
             total_candidates=0,
@@ -1353,6 +1551,7 @@ def classify_url_text(
             category_used=category_result.category,
             category_inference=category_response,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(software_candidates),
@@ -1480,6 +1679,12 @@ def classify_url_text(
             dataset_candidates.sort(key=lambda item: item.probability, reverse=True)
             for idx, candidate in enumerate(dataset_candidates, start=1):
                 candidate.rank = idx
+            _apply_dataset_consensus_boost(
+                dataset_candidates,
+                heuristics_best=dataset_heuristics_best,
+                text_source=dataset_text_source,
+                fusion_info=dataset_fusion,
+            )
             add_contrastive_rationales(dataset_candidates)
             dataset_best = dataset_candidates[0] if dataset_candidates else None
 
@@ -1494,6 +1699,7 @@ def classify_url_text(
             category_used=category_result.category,
             category_inference=category_response,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(dataset_candidates),
@@ -1679,6 +1885,7 @@ def classify_url_text(
         category_used=category_result.category,
         category_inference=category_response,
         agriculture_relevance=agriculture_response,
+        topics=topics_response,
         classification_skipped=False,
         skip_reason=None,
         total_candidates=len(final_candidates),
@@ -1878,6 +2085,12 @@ def classify_document(
         ],
     )
 
+    topics_response = _infer_topics_response(
+        text=asset.text,
+        lines=[line.strip() for line in asset.text.splitlines() if line.strip()][:20] or None,
+        agri_relevance=agri_relevance,
+    )
+
     if category_result.category == "Image":
         stage_start = time.time()
         unified_image_candidates, unified_image_best = _build_unified_candidates(
@@ -1983,6 +2196,7 @@ def classify_document(
                 category_used=category_result.category,
                 category_inference=None,
                 agriculture_relevance=agriculture_response,
+            topics=topics_response,
                 classification_skipped=True,
                 skip_reason="Image classified as non-agriculture; image subcategory classification skipped",
                 total_candidates=0,
@@ -2025,6 +2239,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(unified_image_candidates),
@@ -2170,6 +2385,7 @@ def classify_document(
                 category_used=category_result.category,
                 category_inference=None,
                 agriculture_relevance=agriculture_response,
+            topics=topics_response,
                 classification_skipped=True,
                 skip_reason="Video classified as non-agriculture; video subcategory classification skipped",
                 total_candidates=0,
@@ -2212,6 +2428,7 @@ def classify_document(
                 category_used=category_result.category,
                 category_inference=None,
                 agriculture_relevance=agriculture_response,
+            topics=topics_response,
                 classification_skipped=True,
                 skip_reason="Video transcript and sampled-frame evidence unavailable; video subtype classification skipped",
                 total_candidates=0,
@@ -2304,6 +2521,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(unified_video_candidates),
@@ -2380,6 +2598,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=True,
             skip_reason="Audio transcription unavailable; agriculture and audio subtype classification skipped",
             total_candidates=0,
@@ -2422,6 +2641,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=True,
             skip_reason=f"{category_result.category} classified as non-agriculture; subcategory classification skipped",
             total_candidates=0,
@@ -2555,6 +2775,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(unified_audio_candidates),
@@ -2686,6 +2907,12 @@ def classify_document(
             unified_dataset_candidates.sort(key=lambda item: item.probability, reverse=True)
             for idx, candidate in enumerate(unified_dataset_candidates, start=1):
                 candidate.rank = idx
+            _apply_dataset_consensus_boost(
+                unified_dataset_candidates,
+                heuristics_best=dataset_heuristics_best,
+                text_source=dataset_text_source,
+                fusion_info=dataset_fusion,
+            )
             unified_dataset_best = unified_dataset_candidates[0] if unified_dataset_candidates else None
             add_contrastive_rationales(unified_dataset_candidates)
         processing_time_ms = (time.time() - start_time) * 1000
@@ -2699,6 +2926,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(unified_dataset_candidates),
@@ -2845,6 +3073,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=False,
             skip_reason=None,
             total_candidates=len(unified_software_candidates),
@@ -2894,6 +3123,7 @@ def classify_document(
             category_used=category_result.category,
             category_inference=None,
             agriculture_relevance=agriculture_response,
+            topics=topics_response,
             classification_skipped=True,
             skip_reason=f"Inferred category is {category_result.category}; document subcategory classification skipped",
             total_candidates=0,
@@ -3185,6 +3415,7 @@ def classify_document(
         category_used=category_result.category,
         category_inference=None,
         agriculture_relevance=agriculture_response,
+        topics=topics_response,
         classification_skipped=False,
         skip_reason=None,
         total_candidates=len(unified_document_candidates),
@@ -3529,6 +3760,194 @@ async def classify_endpoint(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+@app.post("/classify-media-llm", response_model=MediaLlmOnlyResponse)
+async def classify_media_llm_endpoint(
+    request: Request,
+    file: UploadFile = File(..., description="Audio or video asset to classify through transcript-first text LLM only"),
+    top_k_candidates: int = Query(5, ge=1, le=10, description="Maximum number of ranked subtype candidates returned"),
+    include_transcript: bool = Query(False, description="If true, include the full recovered transcript in the response"),
+    temperature: float = Query(0.2, ge=0.0, le=1.0, description="Sampling temperature for transcript-first text LLM classification"),
+    max_chars: int = Query(12000, ge=1000, le=24000, description="Maximum transcript characters sent to the text LLM"),
+):
+    """Classify audio/video using transcript-first text LLM only."""
+    if not LLM_CONFIGURED:
+        raise HTTPException(status_code=503, detail="Text LLM is not configured.")
+    if not AUDIO_TRANSCRIPTION_CONFIGURED:
+        raise HTTPException(status_code=503, detail="Media transcriber is not configured or not enabled.")
+
+    filename = file.filename or "unknown.bin"
+    suffix = os.path.splitext(filename)[1].lower()
+    audio_suffixes = {".mp3", ".wav", ".m4a"}
+    video_suffixes = {".mp4", ".avi", ".mov", ".wmv", ".mpeg", ".mpg", ".mkv", ".flv", ".webm", ".3gp", ".mts", ".m2ts", ".vob", ".rmvb"}
+
+    if suffix not in audio_suffixes | video_suffixes:
+        blocked_suffix = get_blocked_suffix(filename)
+        if blocked_suffix:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Blocked file type '{blocked_suffix}'. Executable, installer, and script payloads are not allowed.",
+            )
+        archive_suffix = get_archive_suffix(filename)
+        if archive_suffix:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Archive file type '{archive_suffix}' is not allowed in the current upload flow.",
+            )
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported media file type '{suffix}'. Supported types: {', '.join(sorted(audio_suffixes | video_suffixes))}",
+        )
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            request_size_bytes = int(content_length)
+            if request_size_bytes > MAX_REQUEST_BODY_MB * 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Request body too large ({round(request_size_bytes / (1024 * 1024), 2)} MB). Maximum allowed is {MAX_REQUEST_BODY_MB} MB.",
+                )
+        except ValueError:
+            pass
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    file_size_bytes = len(contents)
+    file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+    if suffix in audio_suffixes and file_size_bytes > MAX_AUDIO_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file too large ({file_size_mb} MB). Maximum allowed is {MAX_AUDIO_UPLOAD_SIZE_MB} MB.",
+        )
+    if suffix in video_suffixes and file_size_bytes > MAX_VIDEO_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Video file too large ({file_size_mb} MB). Maximum allowed is {MAX_VIDEO_UPLOAD_SIZE_MB} MB.",
+        )
+
+    category_used = "Audio" if suffix in audio_suffixes else "Video"
+    stage_timings_ms: Dict[str, float] = {}
+    tmp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
+            tmp_path = tmp.name
+            tmp.write(contents)
+
+        duration_stage_start = time.time()
+        duration_sec = media_duration_seconds(tmp_path)
+        stage_timings_ms["duration_probe_ms"] = round((time.time() - duration_stage_start) * 1000, 2)
+        max_duration_sec = MAX_AUDIO_DURATION_SEC if category_used == "Audio" else MAX_VIDEO_DURATION_SEC
+        if duration_sec and duration_sec > max_duration_sec:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"{category_used} duration too long ({round(duration_sec, 1)} seconds). "
+                    f"Maximum allowed is {max_duration_sec} seconds."
+                ),
+            )
+
+        transcription_stage_start = time.time()
+        transcript_res = transcribe_audio_file(tmp_path) if category_used == "Audio" else transcribe_video_audio(tmp_path)
+        stage_timings_ms["transcription_ms"] = round((time.time() - transcription_stage_start) * 1000, 2)
+
+        if not transcript_res.available:
+            raise HTTPException(status_code=503, detail=transcript_res.rationale)
+        if not transcript_res.text.strip():
+            raise HTTPException(status_code=422, detail=transcript_res.rationale or "Media transcription produced no usable text.")
+
+        llm_stage_start = time.time()
+        if category_used == "Audio":
+            from docint.llm.subcategory_classify import llm_classify_audio_subcategories_text
+
+            llm_res = llm_classify_audio_subcategories_text(
+                transcript_res.text,
+                base_url=LLM_BASE_URL,
+                api_key=LLM_API_KEY,
+                model=LLM_MODEL,
+                max_chars=max_chars,
+                temperature=temperature,
+            )
+        else:
+            from docint.llm.subcategory_classify import llm_classify_video_subcategories_text
+
+            llm_res = llm_classify_video_subcategories_text(
+                transcript_res.text,
+                base_url=LLM_BASE_URL,
+                api_key=LLM_API_KEY,
+                model=LLM_MODEL,
+                max_chars=max_chars,
+                temperature=temperature,
+            )
+        stage_timings_ms["text_llm_ms"] = round((time.time() - llm_stage_start) * 1000, 2)
+
+        candidates = _media_llm_candidates_from_result(llm_res, top_k_candidates=top_k_candidates)
+        best_match = candidates[0] if candidates else None
+        transcript_preview = transcript_res.text[:400].strip()
+        if len(transcript_res.text) > 400:
+            transcript_preview += "..."
+
+        return MediaLlmOnlyResponse(
+            category_used=category_used,
+            best_match=best_match,
+            all_candidates=candidates,
+            text_llm={
+                "subcategory_key": llm_res.subcategory_key,
+                "subcategory_name": llm_res.subcategory_name,
+                "confidence": llm_res.confidence,
+                "model": LLM_MODEL,
+                "rationale": llm_res.rationale,
+            },
+            transcript=MediaLlmTranscriptInfo(
+                available=transcript_res.available,
+                used=transcript_res.used,
+                method=transcript_res.method,
+                model=transcript_res.model,
+                rationale=transcript_res.rationale,
+                text_length=len(transcript_res.text),
+                preview=transcript_preview,
+                full_text=transcript_res.text if include_transcript else None,
+            ),
+            total_candidates=len(candidates),
+            confidence_threshold_met=bool(best_match and best_match.confidence >= 0.35),
+            document_info={
+                "filename": filename,
+                "asset_type": suffix.lstrip("."),
+                "inferred_category": category_used,
+                "source": "media_transcript",
+                "text_length": len(transcript_res.text),
+                "duration_seconds": round(duration_sec, 2) if duration_sec else None,
+            },
+            processing_info={
+                "processing_time_ms": round(sum(stage_timings_ms.values()), 2),
+                "sources_used": ["text_llm", "media_transcriber"],
+                "llm_only": True,
+                "transcript_first": True,
+                "source_mode": "file",
+                "include_transcript": include_transcript,
+                "stage_timings_ms": stage_timings_ms,
+                "transcriber": {
+                    "enabled": MEDIA_TRANSCRIBER_ENABLED,
+                    "configured": AUDIO_TRANSCRIPTION_CONFIGURED,
+                    "model": transcript_res.model,
+                    "method": transcript_res.method,
+                },
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Media LLM classification failed: {str(e)}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:

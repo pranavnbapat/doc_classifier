@@ -11,9 +11,15 @@ from docint.rubrics.subcategory_scorer import FeatureEvidence, SubcategoryScore
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-V5_MODEL_PATH = BASE_DIR / "data_model" / "generated" / "v5" / "subcategories_v5_full_model.json"
-MERGED_MODEL_PATH = BASE_DIR / "data_model" / "generated" / "v4_improved" / "cross_modal_feature_model_v4.json"
-FALLBACK_MODEL_PATH = BASE_DIR / "data_model" / "generated" / "v4" / "subcategory_model_v4.json"
+SUBCATEGORIES_DIR = BASE_DIR / "data_model" / "runtime" / "subcategories"
+SIGNAL_SPECS_DIR = SUBCATEGORIES_DIR / "signal_specs"
+V5_MODEL_PATH = SUBCATEGORIES_DIR / "subcategories_v5_full_model.json"
+AUDIO_SIGNAL_SPEC_PATH = SIGNAL_SPECS_DIR / "audio_signal_spec.json"
+DOCUMENT_SIGNAL_SPEC_PATH = SIGNAL_SPECS_DIR / "document_signal_spec.json"
+DATASET_SIGNAL_SPEC_PATH = SIGNAL_SPECS_DIR / "dataset_signal_spec.json"
+IMAGE_SIGNAL_SPEC_PATH = SIGNAL_SPECS_DIR / "image_signal_spec.json"
+SOFTWARE_SIGNAL_SPEC_PATH = SIGNAL_SPECS_DIR / "software_signal_spec.json"
+VIDEO_SIGNAL_SPEC_PATH = SIGNAL_SPECS_DIR / "video_signal_spec.json"
 
 
 @dataclass(frozen=True)
@@ -126,9 +132,11 @@ LEGACY_TO_UNIFIED: Dict[str, str] = {
 
 
 def _resolve_model_path() -> Path:
-    if V5_MODEL_PATH.exists():
-        return V5_MODEL_PATH
-    return MERGED_MODEL_PATH if MERGED_MODEL_PATH.exists() else FALLBACK_MODEL_PATH
+    # Runtime is v5-only. The legacy v4 / v4_improved fallback chain was retired
+    # once the v5 full model became the committed source of truth.
+    if not V5_MODEL_PATH.exists():
+        raise FileNotFoundError(f"v5 subtype model is missing: {V5_MODEL_PATH}")
+    return V5_MODEL_PATH
 
 
 def _split_indicator_text(text: str) -> List[str]:
@@ -156,6 +164,61 @@ def _strength_to_relation(strength: str, *, is_first: bool) -> str:
     if strength == "Strong" and is_first:
         return "primary"
     return "related"
+
+
+@lru_cache(maxsize=1)
+def load_audio_signal_spec() -> Dict[str, Any]:
+    if not AUDIO_SIGNAL_SPEC_PATH.exists():
+        return {}
+    return json.loads(AUDIO_SIGNAL_SPEC_PATH.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def load_document_signal_spec() -> Dict[str, Any]:
+    if not DOCUMENT_SIGNAL_SPEC_PATH.exists():
+        return {}
+    return json.loads(DOCUMENT_SIGNAL_SPEC_PATH.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def load_image_signal_spec() -> Dict[str, Any]:
+    if not IMAGE_SIGNAL_SPEC_PATH.exists():
+        return {}
+    return json.loads(IMAGE_SIGNAL_SPEC_PATH.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def load_dataset_signal_spec() -> Dict[str, Any]:
+    if not DATASET_SIGNAL_SPEC_PATH.exists():
+        return {}
+    return json.loads(DATASET_SIGNAL_SPEC_PATH.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def load_software_signal_spec() -> Dict[str, Any]:
+    if not SOFTWARE_SIGNAL_SPEC_PATH.exists():
+        return {}
+    return json.loads(SOFTWARE_SIGNAL_SPEC_PATH.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def load_video_signal_spec() -> Dict[str, Any]:
+    if not VIDEO_SIGNAL_SPEC_PATH.exists():
+        return {}
+    return json.loads(VIDEO_SIGNAL_SPEC_PATH.read_text(encoding="utf-8"))
+
+
+def _calibrate_v5_profile_mappings(runtime_category: str, profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    mappings = list(profile.get("unified_mappings", []))
+    profile_id = str(profile.get("id", "")).strip()
+
+    if runtime_category == "Dataset":
+        overrides = load_dataset_signal_spec().get("profile_mapping_overrides", {})
+        return overrides.get(profile_id, mappings)
+    if runtime_category == "Software":
+        overrides = load_software_signal_spec().get("profile_mapping_overrides", {})
+        return overrides.get(profile_id, mappings)
+    return mappings
 
 
 def _build_feature_groups_from_v5_profile(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -240,7 +303,7 @@ def _runtime_payload_from_v5(payload: Dict[str, Any]) -> Dict[str, Any]:
         runtime_category = _normalize_runtime_category(category_name)
         profiles: List[Dict[str, Any]] = []
         for profile in category_payload.get("profiles", []):
-            mappings = list(profile.get("unified_mappings", []))
+            mappings = _calibrate_v5_profile_mappings(runtime_category, profile)
             mappings.sort(key=lambda row: _strength_rank(str(row.get("strength", ""))), reverse=True)
             imports_to_unified = [
                 {
@@ -263,6 +326,12 @@ def _runtime_payload_from_v5(payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
         categories[runtime_category] = {"profiles": profiles}
+
+    present_ids = {item["id"] for item in unified_subcategories}
+    synthetic_dataset_unified = load_dataset_signal_spec().get("synthetic_unified_subcategories", [])
+    for item in synthetic_dataset_unified:
+        if item["id"] not in present_ids:
+            unified_subcategories.append(item)
 
     return {
         "unified_subcategories": unified_subcategories,
@@ -345,6 +414,15 @@ def _extract_dataset_context(text: str, filename: str) -> Dict[str, Any]:
     columns = _extract_prefixed_values(text, ("columns",))
     row_values = _extract_prefixed_values(text, tuple(f"row {idx}" for idx in range(0, 31)))
     text_lower = f"{filename}\n{text}".lower()
+    numeric_value_count = 0
+    prose_like_value_count = 0
+    total_value_count = 0
+    for value in row_values[:200]:
+        total_value_count += 1
+        if re.fullmatch(r"\s*[-+]?\d+(?:[\.,]\d+)?%?\s*", value):
+            numeric_value_count += 1
+        if len(value.split()) >= 12 or len(value) >= 120:
+            prose_like_value_count += 1
     return {
         "text_lower": text_lower,
         "columns": columns,
@@ -352,7 +430,282 @@ def _extract_dataset_context(text: str, filename: str) -> Dict[str, Any]:
         "has_tabular_preview": bool(columns),
         "sheet_mentions": text_lower.count("sheet:"),
         "row_mentions": len(re.findall(r"(?m)^row\s+\d+:", text_lower)),
+        "numeric_value_count": numeric_value_count,
+        "prose_like_value_count": prose_like_value_count,
+        "total_value_count": total_value_count,
     }
+
+
+def _extract_document_context(text: str, filename: str) -> Dict[str, Any]:
+    text_lower = f"{filename}\n{text}".lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullet_lines = [line for line in lines if re.match(r"^([-*•]|\d+[\.\)])\s+", line)]
+    numbered_step_lines = [line for line in lines if re.match(r"^\d+[\.\)]\s+", line)]
+    heading_lines = [
+        line for line in lines
+        if len(line) <= 90 and not re.match(r"^([-*•]|\d+[\.\)])\s+", line) and (line == line.title() or line.isupper())
+    ]
+    colon_lines = [line for line in lines if ":" in line[:60]]
+    citation_hits = re.findall(r"\[(?:\d{1,3}|[A-Za-z][A-Za-z0-9_-]{1,20})\]|\([12]\d{3}\)|doi:|et al\.", text_lower)
+    placeholder_hits = re.findall(r"\[[^\]]{2,40}\]|<[^>]{2,40}>|_{3,}|\.{3,}", text)
+    imperative_hits = re.findall(r"\b(use|apply|install|mix|add|remove|check|measure|record|select|enter|choose|download|upload|follow|prepare)\b", text_lower)
+    policy_hits = re.findall(r"\b(policy|regulation|directive|compliance|governance|framework|standard|guideline|recommendation|stakeholder)\b", text_lower)
+    project_hits = re.findall(r"\b(project|deliverable|milestone|work package|task|objective|reporting|consortium)\b", text_lower)
+    narrative_hits = re.findall(r"\b(challenge|problem|solution|outcome|result|lesson|implementation|case)\b", text_lower)
+    return {
+        "text_lower": text_lower,
+        "lines": lines,
+        "word_count": len(re.findall(r"\b\w+\b", text)),
+        "bullet_count": len(bullet_lines),
+        "numbered_step_count": len(numbered_step_lines),
+        "heading_count": len(heading_lines),
+        "colon_line_count": len(colon_lines),
+        "citation_count": len(citation_hits),
+        "placeholder_count": len(placeholder_hits),
+        "imperative_count": len(imperative_hits),
+        "policy_term_count": len(policy_hits),
+        "project_term_count": len(project_hits),
+        "narrative_term_count": len(narrative_hits),
+    }
+
+
+def _extract_image_context(text: str, filename: str) -> Dict[str, Any]:
+    text_lower = f"{filename}\n{text}".lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    numeric_tokens = re.findall(r"\b\d+(?:\.\d+)?%?\b", text_lower)
+    orientation_terms = re.findall(r"\b(north|south|east|west|latitude|longitude|lat|lon|scale|legend)\b", text_lower)
+    axis_terms = re.findall(r"\b(x-axis|y-axis|axis|axes|legend|series|bar|line|scatter|plot)\b", text_lower)
+    callout_terms = re.findall(r"\b(step \d+|did you know|key message|tip|fact|summary)\b", text_lower)
+    component_terms = re.findall(r"\b(component|process|system|input|output|arrow|flow|structure)\b", text_lower)
+    diagnostic_terms = re.findall(r"\b(symptom|lesion|disease|damage|defect|inspection|close-up)\b", text_lower)
+    field_terms = re.findall(r"\b(field|crop|animal|farm|plot|soil|grazing|orchard|pasture)\b", text_lower)
+    equipment_terms = re.findall(r"\b(machine|equipment|tractor|implement|irrigation|control unit|sensor|device)\b", text_lower)
+    remote_terms = re.findall(r"\b(ndvi|satellite|drone|remote sensing|thermal|multispectral|aerial)\b", text_lower)
+    return {
+        "text_lower": text_lower,
+        "line_count": len(lines),
+        "numeric_count": len(numeric_tokens),
+        "orientation_count": len(orientation_terms),
+        "axis_count": len(axis_terms),
+        "callout_count": len(callout_terms),
+        "component_count": len(component_terms),
+        "diagnostic_count": len(diagnostic_terms),
+        "field_count": len(field_terms),
+        "equipment_count": len(equipment_terms),
+        "remote_count": len(remote_terms),
+    }
+
+
+def _extract_media_transcript_context(text: str, filename: str) -> Dict[str, Any]:
+    text_lower = f"{filename}\n{text}".lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    question_count = len(re.findall(r"\?", text))
+    question_phrase_count = len(re.findall(r"\b(question|q&a|q:|ask|asked)\b", text_lower))
+    answer_phrase_count = len(re.findall(r"\b(answer|a:|respond|response)\b", text_lower))
+    speaker_marker_count = len(re.findall(r"(?m)^(speaker\s*\d+|host|moderator|guest|interviewer|interviewee|farmer|expert)\s*[:\-]", text_lower))
+    first_person_count = len(re.findall(r"\b(i|we|my|our|me|us)\b", text_lower))
+    testimonial_count = len(re.findall(r"\b(in my experience|we found|on our farm|i think|i learned|we implemented)\b", text_lower))
+    step_terms_count = len(re.findall(r"\b(step|first|next|then|finally|before|after)\b", text_lower))
+    field_terms_count = len(re.findall(r"\b(field|farm|plot|crop|livestock|soil|orchard|pasture|in the field)\b", text_lower))
+    slide_terms_count = len(re.findall(r"\b(slide|slides|screen|webinar|presentation|next slide)\b", text_lower))
+    panel_terms_count = len(re.findall(r"\b(panel|moderator|audience|question from the audience)\b", text_lower))
+    simulation_terms_count = len(re.findall(r"\b(simulation|model|animation|forecast|scenario|prediction)\b", text_lower))
+    tool_terms_count = len(re.findall(r"\b(tool|app|software|machine|tractor|interface|dashboard|button|click|menu)\b", text_lower))
+    return {
+        "text_lower": text_lower,
+        "line_count": len(lines),
+        "question_count": question_count,
+        "question_phrase_count": question_phrase_count,
+        "answer_phrase_count": answer_phrase_count,
+        "speaker_marker_count": speaker_marker_count,
+        "first_person_count": first_person_count,
+        "testimonial_count": testimonial_count,
+        "step_terms_count": step_terms_count,
+        "field_terms_count": field_terms_count,
+        "slide_terms_count": slide_terms_count,
+        "panel_terms_count": panel_terms_count,
+        "simulation_terms_count": simulation_terms_count,
+        "tool_terms_count": tool_terms_count,
+    }
+
+
+def _dataset_signal_strength_multiplier(strength: str) -> float:
+    normalized = str(strength or "").strip().lower()
+    if normalized == "strong":
+        return 1.0
+    if normalized == "partial":
+        return 0.88
+    if normalized in {"weak", "weak/partial"}:
+        return 0.72
+    return 1.0
+
+
+def _signal_strength_multiplier(strength: str) -> float:
+    normalized = str(strength or "").strip().lower()
+    if normalized == "strong":
+        return 1.0
+    if normalized == "partial":
+        return 0.88
+    if normalized in {"weak", "weak/partial"}:
+        return 0.72
+    return 1.0
+
+
+def _score_document_signal(text: str, filename: str, feature_id: str) -> tuple[float, List[str]]:
+    context = _extract_document_context(text, filename)
+    text_lower = context["text_lower"]
+    spec = load_document_signal_spec().get("feature_signals", {}).get(feature_id, {})
+    terms = list(spec.get("text_terms", []))
+    score, hits = _match_terms(text_lower, terms, per_hit_weight=float(spec.get("per_hit_weight", 0.12) or 0.12))
+
+    threshold_key = str(spec.get("structural_threshold_key", "")).strip()
+    threshold_min = int(spec.get("structural_threshold_min", 0) or 0)
+    threshold_bonus = float(spec.get("structural_bonus", 0.0) or 0.0)
+    if threshold_key and threshold_min and int(context.get(threshold_key, 0) or 0) >= threshold_min:
+        score = min(1.0, score + threshold_bonus)
+        hits = list(dict.fromkeys(hits + [threshold_key]))[:10]
+
+    required_keys_any = list(spec.get("required_context_keys_any", []))
+    required_bonus = float(spec.get("required_context_bonus", 0.0) or 0.0)
+    if required_keys_any and any(int(context.get(key, 0) or 0) > 0 for key in required_keys_any):
+        score = min(1.0, score + required_bonus)
+        hits = list(dict.fromkeys(hits + required_keys_any[:2]))[:10]
+
+    bonus_terms = list(spec.get("bonus_terms", []))
+    bonus = float(spec.get("bonus", 0.0) or 0.0)
+    if bonus_terms and any(term in text_lower for term in bonus_terms):
+        score = min(1.0, score + bonus)
+
+    paired_terms_any = list(spec.get("paired_terms_any", []))
+    pair_bonus = float(spec.get("pair_bonus", 0.0) or 0.0)
+    for group in paired_terms_any:
+        pair_terms = [str(term).strip().lower() for term in group if str(term).strip()]
+        if pair_terms and all(term in text_lower for term in pair_terms):
+            score = min(1.0, score + pair_bonus)
+            hits = list(dict.fromkeys(hits + pair_terms))[:10]
+            break
+
+    negative_terms = list(spec.get("negative_terms", []))
+    negative_penalty_scale = float(spec.get("negative_penalty_scale", 0.4) or 0.4)
+    if negative_terms:
+        neg_score, _ = _match_terms(
+            text_lower,
+            negative_terms,
+            per_hit_weight=float(spec.get("negative_per_hit_weight", 0.08) or 0.08),
+        )
+        if neg_score > 0.0:
+            score = max(0.0, score - min(0.36, neg_score * negative_penalty_scale))
+
+    score = min(1.0, score * _signal_strength_multiplier(str(spec.get("signal_strength", "Strong"))))
+    return score, hits[:10]
+
+
+def _score_image_signal(text: str, filename: str, feature_id: str) -> tuple[float, List[str]]:
+    context = _extract_image_context(text, filename)
+    text_lower = context["text_lower"]
+    spec = load_image_signal_spec().get("feature_signals", {}).get(feature_id, {})
+    terms = list(spec.get("text_terms", []))
+    score, hits = _match_terms(text_lower, terms, per_hit_weight=float(spec.get("per_hit_weight", 0.12) or 0.12))
+
+    threshold_key = str(spec.get("structural_threshold_key", "")).strip()
+    threshold_min = int(spec.get("structural_threshold_min", 0) or 0)
+    threshold_bonus = float(spec.get("structural_bonus", 0.0) or 0.0)
+    if threshold_key and threshold_min and int(context.get(threshold_key, 0) or 0) >= threshold_min:
+        score = min(1.0, score + threshold_bonus)
+        hits = list(dict.fromkeys(hits + [threshold_key]))[:10]
+
+    required_keys_any = list(spec.get("required_context_keys_any", []))
+    required_bonus = float(spec.get("required_context_bonus", 0.0) or 0.0)
+    if required_keys_any and any(int(context.get(key, 0) or 0) > 0 for key in required_keys_any):
+        score = min(1.0, score + required_bonus)
+        hits = list(dict.fromkeys(hits + required_keys_any[:2]))[:10]
+
+    bonus_terms = list(spec.get("bonus_terms", []))
+    bonus = float(spec.get("bonus", 0.0) or 0.0)
+    if bonus_terms and any(term in text_lower for term in bonus_terms):
+        score = min(1.0, score + bonus)
+
+    paired_terms_any = list(spec.get("paired_terms_any", []))
+    pair_bonus = float(spec.get("pair_bonus", 0.0) or 0.0)
+    for group in paired_terms_any:
+        pair_terms = [str(term).strip().lower() for term in group if str(term).strip()]
+        if pair_terms and all(term in text_lower for term in pair_terms):
+            score = min(1.0, score + pair_bonus)
+            hits = list(dict.fromkeys(hits + pair_terms))[:10]
+            break
+
+    negative_terms = list(spec.get("negative_terms", []))
+    negative_penalty_scale = float(spec.get("negative_penalty_scale", 0.4) or 0.4)
+    if negative_terms:
+        neg_score, _ = _match_terms(
+            text_lower,
+            negative_terms,
+            per_hit_weight=float(spec.get("negative_per_hit_weight", 0.08) or 0.08),
+        )
+        if neg_score > 0.0:
+            score = max(0.0, score - min(0.36, neg_score * negative_penalty_scale))
+
+    score = min(1.0, score * _signal_strength_multiplier(str(spec.get("signal_strength", "Strong"))))
+    return score, hits[:10]
+
+
+def _score_transcript_signal(context: Dict[str, Any], spec: Dict[str, Any]) -> tuple[float, List[str]]:
+    text_lower = context["text_lower"]
+    terms = list(spec.get("text_terms", []))
+    score, hits = _match_terms(text_lower, terms, per_hit_weight=float(spec.get("per_hit_weight", 0.12) or 0.12))
+
+    threshold_key = str(spec.get("structural_threshold_key", "")).strip()
+    threshold_min = int(spec.get("structural_threshold_min", 0) or 0)
+    threshold_bonus = float(spec.get("structural_bonus", 0.0) or 0.0)
+    if threshold_key and threshold_min and int(context.get(threshold_key, 0) or 0) >= threshold_min:
+        score = min(1.0, score + threshold_bonus)
+        hits = list(dict.fromkeys(hits + [threshold_key]))[:10]
+
+    required_keys_any = list(spec.get("required_context_keys_any", []))
+    required_bonus = float(spec.get("required_context_bonus", 0.0) or 0.0)
+    if required_keys_any and any(int(context.get(key, 0) or 0) > 0 for key in required_keys_any):
+        score = min(1.0, score + required_bonus)
+        hits = list(dict.fromkeys(hits + required_keys_any[:2]))[:10]
+
+    bonus_terms = list(spec.get("bonus_terms", []))
+    bonus = float(spec.get("bonus", 0.0) or 0.0)
+    if bonus_terms and any(term in text_lower for term in bonus_terms):
+        score = min(1.0, score + bonus)
+
+    paired_terms_any = list(spec.get("paired_terms_any", []))
+    pair_bonus = float(spec.get("pair_bonus", 0.0) or 0.0)
+    for group in paired_terms_any:
+        pair_terms = [str(term).strip().lower() for term in group if str(term).strip()]
+        if pair_terms and all(term in text_lower for term in pair_terms):
+            score = min(1.0, score + pair_bonus)
+            hits = list(dict.fromkeys(hits + pair_terms))[:10]
+            break
+
+    negative_terms = list(spec.get("negative_terms", []))
+    negative_penalty_scale = float(spec.get("negative_penalty_scale", 0.4) or 0.4)
+    if negative_terms:
+        neg_score, _ = _match_terms(
+            text_lower,
+            negative_terms,
+            per_hit_weight=float(spec.get("negative_per_hit_weight", 0.08) or 0.08),
+        )
+        if neg_score > 0.0:
+            score = max(0.0, score - min(0.36, neg_score * negative_penalty_scale))
+
+    score = min(1.0, score * _signal_strength_multiplier(str(spec.get("signal_strength", "Strong"))))
+    return score, hits[:10]
+
+
+def _score_audio_signal(text: str, filename: str, feature_id: str) -> tuple[float, List[str]]:
+    context = _extract_media_transcript_context(text, filename)
+    spec = load_audio_signal_spec().get("feature_signals", {}).get(feature_id, {})
+    return _score_transcript_signal(context, spec)
+
+
+def _score_video_signal(text: str, filename: str, feature_id: str) -> tuple[float, List[str]]:
+    context = _extract_media_transcript_context(text, filename)
+    spec = load_video_signal_spec().get("feature_signals", {}).get(feature_id, {})
+    return _score_transcript_signal(context, spec)
 
 
 def _score_dataset_signal(context: Dict[str, Any], feature_id: str) -> tuple[float, List[str]]:
@@ -360,6 +713,7 @@ def _score_dataset_signal(context: Dict[str, Any], feature_id: str) -> tuple[flo
     columns = context["columns"]
     row_values = context["row_values"]
     header_space = " ".join(columns)
+    row_space = " ".join(row_values)
 
     def _hits(terms: List[str], *, in_columns_weight: float = 0.26, in_text_weight: float = 0.14) -> tuple[float, List[str]]:
         hits: List[str] = []
@@ -370,7 +724,7 @@ def _score_dataset_signal(context: Dict[str, Any], feature_id: str) -> tuple[flo
                 hits.append(term)
                 score += in_columns_weight
                 matched = True
-            elif term in header_space or term in " ".join(row_values):
+            elif term in header_space or term in row_space:
                 hits.append(term)
                 score += in_text_weight
                 matched = True
@@ -386,79 +740,193 @@ def _score_dataset_signal(context: Dict[str, Any], feature_id: str) -> tuple[flo
                 break
         return min(1.0, score), hits
 
-    signals: Dict[str, List[str]] = {
-        "entity_focus": ["field", "plot", "farm", "parcel", "crop", "animal", "livestock", "soil", "water", "orchard", "block_id", "field_id"],
-        "event_log_structure": ["event", "activity", "operation", "task", "schedule", "start_time", "end_time", "status", "operator", "performed_by"],
-        "input_application_records": ["fertilizer", "fertiliser", "pesticide", "herbicide", "fungicide", "seed", "dose", "rate", "application", "input"],
-        "output_measurement_structure": ["yield", "production", "harvest", "output", "quantity", "weight", "biomass", "tons", "kg", "productivity"],
-        "temporal_series_structure": ["date", "time", "timestamp", "datetime", "day", "month", "year", "hour", "minute", "daily", "hourly"],
-        "spatial_geometry_structure": ["latitude", "longitude", "lat", "lon", "lng", "geometry", "geojson", "polygon", "wkt", "epsg", "bbox", "x", "y"],
-        "derived_aggregation_structure": ["average", "mean", "median", "sum", "total", "index", "score", "kpi", "aggregated", "forecast", "estimate", "derived"],
-        "social_survey_structure": ["survey", "respondent", "questionnaire", "likert", "demographic", "gender", "age", "household", "attitude", "response"],
-        "machine_telemetry_structure": ["sensor", "telemetry", "tractor", "machine", "equipment", "engine", "rpm", "fuel", "speed", "canbus", "gps", "implement"],
-    }
+    spec = load_dataset_signal_spec().get("feature_signals", {}).get(feature_id, {})
+    terms = list(spec.get("column_terms", []))
+    text_terms = list(spec.get("text_terms", terms))
+    column_weight = float(spec.get("column_hit_weight", 0.26))
+    text_weight = float(spec.get("text_hit_weight", 0.14))
+    score, hits = _hits(terms, in_columns_weight=column_weight, in_text_weight=text_weight)
+    extra_score, extra_hits = _hits(text_terms, in_columns_weight=0.0, in_text_weight=text_weight)
+    score = max(score, extra_score)
+    hits = list(dict.fromkeys(hits + extra_hits))[:10]
 
-    terms = signals.get(feature_id, [])
-    score, hits = _hits(terms)
+    row_count_min = int(spec.get("row_count_min", 0) or 0)
+    row_count_bonus_terms = list(spec.get("row_count_bonus_terms", []))
+    row_count_bonus = float(spec.get("row_count_bonus", 0.0) or 0.0)
+    if row_count_min and context["row_mentions"] >= row_count_min:
+        if not row_count_bonus_terms or any(term in text_lower for term in row_count_bonus_terms):
+            score = min(1.0, score + row_count_bonus)
 
-    if feature_id == "event_log_structure":
-        if context["row_mentions"] >= 3 and any(term in text_lower for term in ("operation", "event", "activity", "task")):
-            score = min(1.0, score + 0.18)
-    elif feature_id == "temporal_series_structure":
-        if context["row_mentions"] >= 3 and any(term in columns for term in ("date", "time", "timestamp")):
-            score = min(1.0, score + 0.2)
-    elif feature_id == "spatial_geometry_structure":
-        if any(term in columns for term in ("lat", "lon", "lng", "geometry", "wkt", "epsg")):
-            score = min(1.0, score + 0.22)
-    elif feature_id == "derived_aggregation_structure":
-        if any(term in text_lower for term in ("average", "forecast", "index", "score", "aggregated")):
-            score = min(1.0, score + 0.14)
+    required_columns_any = list(spec.get("required_columns_any", []))
+    column_bonus = float(spec.get("bonus", spec.get("row_count_bonus", 0.0)) or 0.0)
+    if required_columns_any and any(term in columns for term in required_columns_any):
+        score = min(1.0, score + column_bonus)
 
-    if context["has_tabular_preview"] and feature_id in signals:
-        score = min(1.0, score + 0.08)
+    bonus_terms = list(spec.get("bonus_terms", []))
+    bonus = float(spec.get("bonus", 0.0) or 0.0)
+    if bonus_terms and any(term in text_lower for term in bonus_terms):
+        score = min(1.0, score + bonus)
 
+    paired_terms_any = list(spec.get("paired_terms_any", []))
+    pair_bonus = float(spec.get("pair_bonus", 0.0) or 0.0)
+    for group in paired_terms_any:
+        terms = [str(term).strip().lower() for term in group if str(term).strip()]
+        if terms and all(
+            any(term == col or term in col for col in columns) or term in header_space or term in row_space or term in text_lower
+            for term in terms
+        ):
+            score = min(1.0, score + pair_bonus)
+            hits = list(dict.fromkeys(hits + terms))[:10]
+            break
+
+    negative_terms = list(spec.get("negative_terms", []))
+    negative_scale = float(spec.get("negative_penalty_scale", 0.55) or 0.55)
+    if negative_terms:
+        neg_score, _ = _hits(
+            negative_terms,
+            in_columns_weight=float(spec.get("negative_column_hit_weight", 0.16) or 0.16),
+            in_text_weight=float(spec.get("negative_text_hit_weight", 0.10) or 0.10),
+        )
+        if neg_score > 0.0:
+            score = max(0.0, score - min(0.4, neg_score * negative_scale))
+
+    if context["has_tabular_preview"] and spec:
+        score = min(1.0, score + float(spec.get("tabular_bonus", 0.08) or 0.0))
+
+    score = min(1.0, score * _signal_strength_multiplier(str(spec.get("signal_strength", "Strong"))))
     return score, hits[:10]
 
 
 def _score_software_signal(text: str, filename: str, feature_id: str) -> tuple[float, List[str]]:
     text_lower = f"{filename}\n{text}".lower()
-    signals: Dict[str, List[str]] = {
-        "workflow_role_and_scope": ["workflow", "planning", "records", "manage", "management", "operations", "module", "user", "platform", "dashboard"],
-        "integration_and_interoperability_connectivity": ["api", "integration", "interoperability", "connector", "sync", "import", "export", "plugin", "webhook"],
-        "temporal_recording_orientation": ["track", "tracking", "record", "logging", "history", "timeline", "over time", "time series", "monitor"],
-        "input_modality_and_capture_mode": ["mobile", "tablet", "offline", "form", "capture", "camera", "gps", "scan", "entry", "input"],
-        "field_capture_and_observation_structure": ["field", "scouting", "inspection", "observation", "geo-tagged", "in-field", "capture", "survey in field"],
-        "spatial_interaction_and_georeferenced_analysis": ["map", "mapping", "gis", "geospatial", "parcel", "layer", "location", "georeferenced", "spatial"],
-        "analysis_visualisation_and_insight_generation": ["analysis", "analytics", "dashboard", "visualisation", "insight", "kpi", "reporting", "chart"],
-        "model_prediction_and_scenario_logic": ["simulate", "simulation", "forecast", "prediction", "scenario", "optimisation", "model"],
-        "automation_control_and_triggering": ["automation", "automatic", "control", "trigger", "alert", "schedule action", "irrigation control", "actuator"],
-        "learning_mechanics_and_training_design": ["training", "learning", "lesson", "quiz", "tutorial", "guided", "practice", "assessment"],
-    }
+    spec = load_software_signal_spec().get("feature_signals", {}).get(feature_id, {})
+    terms = list(spec.get("text_terms", []))
+    score, hits = _match_terms(text_lower, terms, per_hit_weight=float(spec.get("per_hit_weight", 0.18) or 0.18))
 
-    terms = signals.get(feature_id, [])
-    score, hits = _match_terms(text_lower, terms, per_hit_weight=0.18)
+    bonus_terms = list(spec.get("bonus_terms", []))
+    bonus = float(spec.get("bonus", 0.0) or 0.0)
+    if bonus_terms and any(term in text_lower for term in bonus_terms):
+        score = min(1.0, score + bonus)
 
-    if feature_id == "workflow_role_and_scope" and any(term in text_lower for term in ("platform", "dashboard", "management")):
-        score = min(1.0, score + 0.16)
-    elif feature_id == "integration_and_interoperability_connectivity" and any(term in text_lower for term in ("api", "integration", "import", "export")):
-        score = min(1.0, score + 0.16)
-    elif feature_id == "field_capture_and_observation_structure" and any(term in text_lower for term in ("mobile app", "field app", "scouting")):
-        score = min(1.0, score + 0.14)
-    elif feature_id == "analysis_visualisation_and_insight_generation" and any(term in text_lower for term in ("dashboard", "chart", "analytics")):
-        score = min(1.0, score + 0.14)
-    elif feature_id == "automation_control_and_triggering" and any(term in text_lower for term in ("control", "automation", "alert")):
-        score = min(1.0, score + 0.14)
+    paired_terms_any = list(spec.get("paired_terms_any", []))
+    pair_bonus = float(spec.get("pair_bonus", 0.0) or 0.0)
+    for group in paired_terms_any:
+        pair_terms = [str(term).strip().lower() for term in group if str(term).strip()]
+        if pair_terms and all(term in text_lower for term in pair_terms):
+            score = min(1.0, score + pair_bonus)
+            hits = list(dict.fromkeys(hits + pair_terms))[:10]
+            break
 
+    negative_terms = list(spec.get("negative_terms", []))
+    negative_penalty_scale = float(spec.get("negative_penalty_scale", 0.5) or 0.5)
+    if negative_terms:
+        neg_score, _ = _match_terms(
+            text_lower,
+            negative_terms,
+            per_hit_weight=float(spec.get("negative_per_hit_weight", 0.10) or 0.10),
+        )
+        if neg_score > 0.0:
+            score = max(0.0, score - min(0.4, neg_score * negative_penalty_scale))
+
+    score = min(1.0, score * _signal_strength_multiplier(str(spec.get("signal_strength", "Strong"))))
     return score, hits[:10]
+
+
+def _dataset_extension(filename: str) -> str:
+    suffix = Path(filename or "").suffix.lower().strip()
+    return suffix if suffix.startswith(".") else ""
+
+
+def _score_dataset_scope_confidence(text: str, filename: str) -> tuple[float, List[str]]:
+    spec = load_dataset_signal_spec()
+    format_spec = spec.get("file_format_baseline_signals", {})
+    structural_spec = spec.get("structural_signals_universal", {})
+    context = _extract_dataset_context(text, filename)
+    suffix = _dataset_extension(filename)
+
+    baseline_hits: List[str] = []
+    baseline_bonus = 0.0
+    for bucket_name, bucket in format_spec.items():
+        if bucket_name.startswith("_") or not isinstance(bucket, dict):
+            continue
+        extensions = [str(item).lower() for item in bucket.get("extensions", [])]
+        if suffix and suffix in extensions:
+            baseline_bonus = max(baseline_bonus, float(bucket.get("dataset_confidence_bonus", 0.0) or 0.0))
+            baseline_hits = [bucket_name, suffix]
+
+    indicators = structural_spec.get("indicators", {})
+    anti_indicators = structural_spec.get("anti_indicators", {})
+    structural_bonus = 0.0
+    structural_hits: List[str] = []
+
+    min_columns = int(structural_spec.get("min_columns_for_dataset", 2) or 2)
+    min_rows = int(structural_spec.get("min_rows_for_dataset", 2) or 2)
+    has_tabular_shape = len(context["columns"]) >= min_columns and context["row_mentions"] >= min_rows
+    if has_tabular_shape:
+        structural_bonus += float(structural_spec.get("tabular_shape_bonus", 0.0) or 0.0)
+        structural_hits.append("tabular_shape")
+
+    if context["has_tabular_preview"] and "header_row_detected" in indicators:
+        structural_bonus += float(indicators["header_row_detected"].get("bonus", 0.0) or 0.0)
+        structural_hits.append("header_row_detected")
+
+    if context["row_mentions"] >= 2 and "consistent_row_width" in indicators:
+        structural_bonus += float(indicators["consistent_row_width"].get("bonus", 0.0) or 0.0)
+        structural_hits.append("consistent_row_width")
+
+    id_patterns = [str(item).lower() for item in indicators.get("id_column_present", {}).get("patterns_any", [])]
+    if id_patterns and any(
+        col == pattern or col.endswith(pattern) or pattern in col
+        for col in context["columns"]
+        for pattern in id_patterns
+    ):
+        structural_bonus += float(indicators["id_column_present"].get("bonus", 0.0) or 0.0)
+        structural_hits.append("id_column_present")
+
+    date_patterns = [str(item).lower() for item in indicators.get("date_column_present", {}).get("patterns_any", [])]
+    if date_patterns and any(
+        pattern in col
+        for col in context["columns"]
+        for pattern in date_patterns
+    ):
+        structural_bonus += float(indicators["date_column_present"].get("bonus", 0.0) or 0.0)
+        structural_hits.append("date_column_present")
+
+    total_value_count = max(1, int(context.get("total_value_count", 0) or 0))
+    numeric_ratio = float(context.get("numeric_value_count", 0) or 0) / total_value_count
+    if numeric_ratio >= 0.35 and "numeric_column_majority" in indicators:
+        structural_bonus += float(indicators["numeric_column_majority"].get("bonus", 0.0) or 0.0)
+        structural_hits.append("numeric_column_majority")
+
+    penalty = 0.0
+    prose_ratio = float(context.get("prose_like_value_count", 0) or 0) / total_value_count
+    if prose_ratio >= 0.35 and "long_prose_columns" in anti_indicators:
+        penalty += float(anti_indicators["long_prose_columns"].get("penalty", 0.0) or 0.0)
+        structural_hits.append("long_prose_columns")
+    if context["row_mentions"] <= 1 and "single_row_data" in anti_indicators:
+        penalty += float(anti_indicators["single_row_data"].get("penalty", 0.0) or 0.0)
+        structural_hits.append("single_row_data")
+
+    raw_score = max(0.0, baseline_bonus + structural_bonus - penalty)
+    runtime_bonus = min(0.18, raw_score * 0.45)
+    return round(runtime_bonus, 4), list(dict.fromkeys(baseline_hits + structural_hits))[:8]
 
 
 def _feature_specific_signal(text: str, filename: str, category: str, feature_id: str) -> tuple[float, List[str]]:
     runtime_category = _normalize_runtime_category(category)
+    if runtime_category == "Audio":
+        return _score_audio_signal(text, filename, feature_id)
+    if runtime_category == "Document":
+        return _score_document_signal(text, filename, feature_id)
+    if runtime_category == "Image":
+        return _score_image_signal(text, filename, feature_id)
     if runtime_category == "Dataset":
         return _score_dataset_signal(_extract_dataset_context(text, filename), feature_id)
     if runtime_category == "Software":
         return _score_software_signal(text, filename, feature_id)
-    return 0.0, []
+    if runtime_category == "Video":
+        return _score_video_signal(text, filename, feature_id)
+    return 0.0, [] 
 
 
 def _profile_name_terms(profile: Dict[str, Any]) -> List[str]:
@@ -655,6 +1123,10 @@ def score_unified_subcategories(
     defs = load_unified_subtypes()
     support_terms = load_unified_support_terms()
     profile_scores = score_intermediate_profiles(category=runtime_category, text=text, filename=filename)
+    dataset_scope_bonus = 0.0
+    dataset_scope_hits: List[str] = []
+    if runtime_category == "Dataset":
+        dataset_scope_bonus, dataset_scope_hits = _score_dataset_scope_confidence(text, filename)
     profile_by_unified: Dict[str, List[Dict[str, Any]]] = {}
     for profile in profile_scores:
         for link in profile.get("imports_to_unified", []):
@@ -703,6 +1175,8 @@ def score_unified_subcategories(
 
         fused_core = max(direct_score, profile_score)
         total_score = (0.48 * fused_core) + (0.22 * profile_score) + (0.16 * prior_score) + agreement_bonus
+        if runtime_category == "Dataset" and (direct_score > 0.0 or profile_score > 0.0 or prior_score > 0.0):
+            total_score += dataset_scope_bonus
         if not applicable:
             total_score = 0.0
         elif fused_core < 0.08 and prior_score < 0.10:
@@ -751,6 +1225,14 @@ def score_unified_subcategories(
                 excerpts=[],
             ),
         }
+        if runtime_category == "Dataset":
+            details["dataset_scope_confidence"] = FeatureEvidence(
+                feature_name="dataset_scope_confidence",
+                detected=dataset_scope_bonus > 0.0,
+                score=round(dataset_scope_bonus, 4),
+                raw_value={"matches": dataset_scope_hits},
+                excerpts=dataset_scope_hits[:3],
+            )
         features_found = [name for name, ev in details.items() if ev.detected]
         rationale_bits: List[str] = []
         if direct_hits:
@@ -765,6 +1247,8 @@ def score_unified_subcategories(
             rationale_bits.append("signal/profile agreement")
         if applicable and (direct_score > 0.0 or profile_score > 0.0 or prior_score > 0.0):
             rationale_bits.append(f"applicable to {runtime_category}")
+        if runtime_category == "Dataset" and dataset_scope_hits:
+            rationale_bits.append(f"dataset format/shape support: {', '.join(dataset_scope_hits[:3])}")
         rationale = "; ".join(rationale_bits) if rationale_bits else "minimal unified subtype evidence"
 
         scores.append(
@@ -780,6 +1264,51 @@ def score_unified_subcategories(
                 rationale=f"{subtype.name} selected via {rationale} (confidence: {total_score:.2f})",
             )
         )
+
+    if runtime_category == "Dataset":
+        by_id = {item.subcategory_id: item for item in scores}
+        fallback_rule = load_dataset_signal_spec().get("broad_fallback_rule", {})
+        broad = by_id.get(str(fallback_rule.get("broad_subcategory_id", "structured_domain_datasets")))
+        specific_ids = tuple(fallback_rule.get("specific_subcategory_ids", []))
+        specific_scores = [by_id[item_id].confidence for item_id in specific_ids if item_id in by_id]
+        strongest_specific = max(specific_scores, default=0.0)
+        min_specific_score = float(fallback_rule.get("min_specific_score", 0.45) or 0.45)
+        margin = float(fallback_rule.get("margin_below_specific", 0.02) or 0.02)
+        if broad and strongest_specific >= min_specific_score and broad.confidence >= strongest_specific:
+            capped = round(max(0.0, strongest_specific - margin), 4)
+            broad.confidence = capped
+            broad.evidence_score = capped
+            broad.rationale += " Broad structured dataset label was down-weighted because a more specific dataset subtype had strong evidence."
+
+    if runtime_category == "Software":
+        by_id = {item.subcategory_id: item for item in scores}
+        fallback_rule = load_software_signal_spec().get("broad_fallback_rule", {})
+        broad = by_id.get(str(fallback_rule.get("broad_subcategory_id", "software_tools_and_applications")))
+        specific_ids = tuple(fallback_rule.get("specific_subcategory_ids", []))
+        specific_scores = [by_id[item_id].confidence for item_id in specific_ids if item_id in by_id]
+        strongest_specific = max(specific_scores, default=0.0)
+        min_specific_score = float(fallback_rule.get("min_specific_score", 0.40) or 0.40)
+        margin = float(fallback_rule.get("margin_below_specific", 0.02) or 0.02)
+        if broad and strongest_specific >= min_specific_score and broad.confidence >= strongest_specific:
+            capped = round(max(0.0, strongest_specific - margin), 4)
+            broad.confidence = capped
+            broad.evidence_score = capped
+            broad.rationale += " Broad software tool label was down-weighted because a more specific software subtype had strong evidence."
+
+    if runtime_category == "Image":
+        by_id = {item.subcategory_id: item for item in scores}
+        fallback_rule = load_image_signal_spec().get("broad_fallback_rule", {})
+        broad = by_id.get(str(fallback_rule.get("broad_subcategory_id", "photographs_and_field_images")))
+        specific_ids = tuple(fallback_rule.get("specific_subcategory_ids", []))
+        specific_scores = [by_id[item_id].confidence for item_id in specific_ids if item_id in by_id]
+        strongest_specific = max(specific_scores, default=0.0)
+        min_specific_score = float(fallback_rule.get("min_specific_score", 0.40) or 0.40)
+        margin = float(fallback_rule.get("margin_below_specific", 0.02) or 0.02)
+        if broad and strongest_specific >= min_specific_score and broad.confidence >= strongest_specific:
+            capped = round(max(0.0, strongest_specific - margin), 4)
+            broad.confidence = capped
+            broad.evidence_score = capped
+            broad.rationale += " Broad photograph label was down-weighted because a more specific image subtype had strong evidence."
 
     scores.sort(key=lambda item: item.confidence, reverse=True)
     return scores

@@ -106,8 +106,8 @@ Strong heuristic URL outcomes can return without the extra text-LLM round-trip.
 ### 4. Agriculture Relevance Gate
 
 - Module: [agriculture_pipeline.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/docint/domain/agriculture_pipeline.py)
-- Lexicon source: [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon.json)
-- Generated Stage 2 resources: [data_model/generated](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/generated)
+- Lexicon source: [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/runtime/agriculture/lexicon.json)
+- Generated Stage 2 resources: [data_model/runtime](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/runtime)
 
 The service now performs agriculture relevance assessment before document-subcategory classification:
 

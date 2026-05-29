@@ -45,18 +45,6 @@ def _count_term_hits(haystack: str, terms: tuple[str, ...]) -> int:
 def infer_file_category(asset: IngestedAsset, upload_content_type: str | None = None) -> CategoryInferenceResult:
     mime = (upload_content_type or asset.mime_type or "").lower().strip()
 
-    if mime == "application/pdf" or mime.startswith("text/") or mime in {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/msword",
-        "application/vnd.ms-powerpoint",
-    }:
-        return CategoryInferenceResult(
-            category="Document",
-            confidence=0.98,
-            rationale=f"File MIME {mime or asset.mime_type} is routed as Document",
-        )
-
     if mime in {
         "text/csv",
         "text/tab-separated-values",
@@ -69,6 +57,18 @@ def infer_file_category(asset: IngestedAsset, upload_content_type: str | None = 
             category="Dataset",
             confidence=0.98,
             rationale=f"File MIME {mime or asset.mime_type} is routed as Dataset",
+        )
+
+    if mime == "application/pdf" or mime.startswith("text/") or mime in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/msword",
+        "application/vnd.ms-powerpoint",
+    }:
+        return CategoryInferenceResult(
+            category="Document",
+            confidence=0.98,
+            rationale=f"File MIME {mime or asset.mime_type} is routed as Document",
         )
 
     if mime.startswith("image/"):

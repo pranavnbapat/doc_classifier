@@ -36,7 +36,7 @@ class AgricultureLexiconEntry:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LEXICON_PATH = REPO_ROOT / "data_model" / "agriculture_lexicon.json"
+LEXICON_PATH = REPO_ROOT / "data_model" / "runtime" / "agriculture" / "lexicon.json"
 
 
 def _normalize_text(text: str) -> str:

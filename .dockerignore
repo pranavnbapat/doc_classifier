@@ -34,10 +34,11 @@ htmlcov/
 
 # Documentation
 README.md
-ARCHITECTURE.md
+architectures/ARCHITECTURE.md
 
 # Old/deprecated files
 old/
+stale/
 
 # Local development
 *.local.sh
@@ -46,11 +47,10 @@ old/
 # Sample files (not needed in container)
 files/
 
-# Data build sources / local reference assets not needed at runtime
-data_model/*.pdf
-data_model/new/
-data_model/generated/agrovoc_full_export.jsonl
-data_model/generated/agrovoc_full_export.checkpoint.json
+# data_model: only runtime/ is needed in the image; build inputs/intermediates
+# and docs are not.
+data_model/build/
+data_model/docs/
 
 # Docker files themselves
 Dockerfile

@@ -21,8 +21,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--inputs", nargs="+", required=True)
     p.add_argument("--model", default="intfloat/multilingual-e5-small")
-    p.add_argument("--out", default="data_model/generated/agriculture_bucket_centroids.npz")
-    p.add_argument("--meta", default="data_model/generated/agriculture_bucket_centroids.meta.json")
+    p.add_argument("--out", default="data_model/runtime/agriculture/bucket_centroids.npz")
+    p.add_argument("--meta", default="data_model/runtime/agriculture/bucket_centroids.meta.json")
     p.add_argument("--batch-size", type=int, default=64)
     return p.parse_args()
 

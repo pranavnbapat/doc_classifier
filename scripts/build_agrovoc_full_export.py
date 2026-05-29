@@ -31,7 +31,7 @@ DETAIL_BATCH_SIZE = 20
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="data_model/generated/agrovoc_full_export.jsonl")
+    parser.add_argument("--out", default="data_model/build/agriculture/agrovoc_full_export.jsonl")
     parser.add_argument("--limit", type=int, default=0, help="0 means no explicit cap")
     parser.add_argument("--langs", nargs="*", default=list(DEFAULT_LANGS))
     parser.add_argument("--page-size", type=int, default=PAGE_SIZE)
@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detail-batch-size", type=int, default=DETAIL_BATCH_SIZE)
     parser.add_argument(
         "--checkpoint",
-        default="data_model/generated/agrovoc_full_export.checkpoint.json",
+        default="data_model/build/agriculture/agrovoc_full_export.checkpoint.json",
         help="Checkpoint file storing the latest completed offset and row count",
     )
     parser.add_argument(

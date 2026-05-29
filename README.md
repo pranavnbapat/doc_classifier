@@ -125,8 +125,8 @@ The API now also returns an `agriculture_relevance` block for each classified as
 
 The current design is staged:
 
-- Stage 1: AGROVOC-style multilingual lexicon matcher backed by [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon.json)
-- Stage 2: small local multilingual embedding model for ambiguous cases, preferably driven by generated agriculture bucket centroids under [data_model/generated](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/generated)
+- Stage 1: AGROVOC-style multilingual lexicon matcher backed by [agriculture_lexicon.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/runtime/agriculture/lexicon.json)
+- Stage 2: small local multilingual embedding model for ambiguous cases, preferably driven by generated agriculture bucket centroids under [data_model/runtime](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/runtime)
 - Stage 3: optional text LLM fallback only when the earlier stages remain uncertain
 
 Eligibility note:
@@ -169,14 +169,14 @@ Resource-generation note:
   - [scripts/build_agriculture_anchor_texts.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_anchor_texts.py) builds bootstrap anchor texts from the runtime lexicon
   - [scripts/build_agrovoc_anchor_texts.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_anchor_texts.py) can fetch richer multilingual anchor texts from AGROVOC via SPARQL
   - [scripts/build_agrovoc_full_export.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agrovoc_full_export.py) exports the broad AGROVOC concept store
-  - [scripts/build_agriculture_lexicon_from_agrovoc.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_lexicon_from_agrovoc.py) converts that full export into the conservative runtime lexical trigger set using [agriculture_lexicon_overrides.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon_overrides.json) and [agriculture_lexicon_blocklist.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/agriculture_lexicon_blocklist.json)
+  - [scripts/build_agriculture_lexicon_from_agrovoc.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/build_agriculture_lexicon_from_agrovoc.py) converts that full export into the conservative runtime lexical trigger set using [agriculture_lexicon_overrides.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/build/agriculture/lexicon_overrides.json) and [agriculture_lexicon_blocklist.json](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/data_model/build/agriculture/lexicon_blocklist.json)
   - [scripts/compute_agriculture_bucket_centroids.py](/home/pranav/PyCharm/EU-FarmBook/doc_classifier/scripts/compute_agriculture_bucket_centroids.py) turns anchor JSONL files into per-bucket centroid resources for Stage 2
 - Local bootstrap commands:
 
 ```bash
 .venv/bin/python scripts/build_agriculture_anchor_texts.py
 .venv/bin/python scripts/compute_agriculture_bucket_centroids.py \
-  --inputs data_model/generated/agriculture_anchor_texts.jsonl
+  --inputs data_model/build/agriculture/anchor_texts.jsonl
 ```
 
 - Full AGROVOC regeneration workflow:
@@ -184,10 +184,10 @@ Resource-generation note:
 ```bash
 .venv/bin/python scripts/build_agrovoc_full_export.py
 .venv/bin/python scripts/build_agriculture_lexicon_from_agrovoc.py \
-  --input data_model/generated/agrovoc_full_export.jsonl
+  --input data_model/build/agriculture/agrovoc_full_export.jsonl
 .venv/bin/python scripts/build_agriculture_anchor_texts.py
 .venv/bin/python scripts/compute_agriculture_bucket_centroids.py \
-  --inputs data_model/generated/agriculture_anchor_texts.jsonl
+  --inputs data_model/build/agriculture/anchor_texts.jsonl
 ```
 
 - The AGROVOC full-export script now supports retries and checkpointed resume:
@@ -198,7 +198,7 @@ Resource-generation note:
 ```
 
 - Checkpoint file:
-  - `data_model/generated/agrovoc_full_export.checkpoint.json`
+  - `data_model/build/agriculture/agrovoc_full_export.checkpoint.json`
 
 - Design principle:
   - the full AGROVOC export is intentionally broad and supports semantic coverage
